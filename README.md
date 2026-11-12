@@ -173,6 +173,21 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"YOUR_MODEL_ID","messages":[{"role":"user","content":"Giới thiệu ngắn về bạn"}],"stream":true}'
 ```
 
+### Chuẩn API hỗ trợ (v0.3.0)
+
+Proxy expose toàn bộ surface chính thức của Open WebUI qua cùng một khoá và cùng cơ chế chọn website/acc:
+
+| Chuẩn | Endpoint phía proxy | Chuyển tới Open WebUI |
+| --- | --- | --- |
+| OpenAI | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/embeddings(/{idx})`, `GET /v1/files/…`, `GET /v1/tools/…`, `GET /v1/mcp/…`, `GET /v1/knowledge/…`, `GET /v1/audio/…` | `/api/v1/…` (chat/models có xử lý riêng: chuẩn hoá model, streaming, chọn acc) |
+| Anthropic Messages | `POST /v1/messages`, `POST /v1/messages/count_tokens` | `/api/v1/messages…` |
+| Ollama native | `/ollama/api/*` (tags, chat, generate, embed, ps, version…) | `/ollama/api/*` verbatim |
+| Admin/utility | `/api/version`, `/api/config`, `/api/chats/…`, `/api/v1/models/all`, `/api/v1/utils/pdf`, `/api/v1/retrieval/…` | `/api/…` verbatim |
+
+- `POST /v1/responses` **không** được map vì Open WebUI chưa triển khai Responses API (upstream trả `404/405`).
+- Path không thuộc allow-list trả `404 Endpoint not found` — proxy không blind-forward.
+- Tool call và request có tác dụng phụ không failover sang acc khác sau khi đã gửi.
+
 ### Tool calling, Web Search, MCP và embeddings
 
 Proxy chuyển tiếp nguyên vẹn tham số OpenAI nên các tính năng của Open WebUI hoạt động bình thường:

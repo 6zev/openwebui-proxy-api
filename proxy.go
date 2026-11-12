@@ -441,19 +441,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	models := r.Method == http.MethodGet && r.URL.Path == "/v1/models"
 	chat := r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions"
-	// OpenAI-compatible embeddings plus upstream Open WebUI tool surfaces
-	// (tool servers / MCP gateways / tool-calling pipelines). JSON is forwarded
-	// to the selected account so Open WebUI keeps ownership of tool execution,
-	// web search and MCP policy.
+	// Every other documented Open WebUI surface (Anthropic Messages, Ollama
+	// native, embeddings, tools, MCP, knowledge, files, admin) is forwarded to
+	// the selected account so upstream keeps ownership of execution.
 	passThrough := false
-	switch {
-	case r.Method == http.MethodPost && r.URL.Path == "/v1/embeddings":
-		passThrough = true
-	case (r.Method == http.MethodGet || r.Method == http.MethodPost) && underAny(r.URL.Path,
-		"/v1/tools/", "/v1/mcp/", "/v1/knowledge/", "/v1/files/"):
-		passThrough = true
-	case r.Method == http.MethodGet && (r.URL.Path == "/v1/tools" || r.URL.Path == "/v1/mcp" || r.URL.Path == "/v1/tools/list"):
-		passThrough = true
+	var surfaceTarget string
+	if !models && !chat {
+		target, ok := mapSurfacePath(r.URL.Path)
+		if ok {
+			passThrough = true
+			surfaceTarget = target
+		}
 	}
 	if !models && !chat && !passThrough {
 		writeError(w, &apiError{404, "Endpoint not found", 0})
@@ -476,7 +474,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if passThrough {
-		p.forwardBody(w, r, body)
+		p.forwardBody(w, r, body, surfaceTarget)
 		return
 	}
 	if chat {
@@ -605,22 +603,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // forwardBody proxies an Open WebUI tool/embeddings/MCP request to one selected
 // account. Upstream owns tool execution, web search and MCP authorization; the
 // proxy only enforces routing, size limits and a sanitized error surface.
-func (p *Proxy) forwardBody(w http.ResponseWriter, r *http.Request, body []byte) {
+func (p *Proxy) forwardBody(w http.ResponseWriter, r *http.Request, body []byte, surfaceTarget string) {
 	candidates, err := p.candidatesFor(r.Header.Get("X-Account-ID"), r.Header.Get("X-Website-ID"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	upstreamPath := r.URL.Path
-	if !strings.HasPrefix(upstreamPath, "/api/") {
-		if r.URL.Path == "/v1/embeddings" {
-			upstreamPath = "/api/embeddings"
-		} else {
-			upstreamPath = "/api" + r.URL.Path
-			if r.URL.Path == "/v1/mcp" {
-				upstreamPath = "/api/v1/mcp/servers"
-			}
-		}
+	upstreamPath := surfaceTarget
+	if upstreamPath == "" {
+		upstreamPath = r.URL.Path
 	}
 	if r.URL.RawQuery != "" {
 		upstreamPath += "?" + r.URL.RawQuery

@@ -598,7 +598,7 @@ func TestProxyPassThroughToolsAndEmbeddings(t *testing.T) {
 		u.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/api/v1/tools/servers":
+		case r.URL.Path == "/v1/tools/servers":
 			_, _ = io.WriteString(w, `{"data":[{"id":"mcp-1","type":"mcp"}]}`)
 		case r.URL.Path == "/api/v1/embeddings" || r.URL.Path == "/api/embeddings":
 			_, _ = io.WriteString(w, `{"data":[{"embedding":[0.1]}]}`)
@@ -630,7 +630,7 @@ func TestProxyPassThroughToolsAndEmbeddings(t *testing.T) {
 	for _, r := range records {
 		paths = append(paths, r.Path)
 	}
-	want := []string{"/api/v1/tools/servers", "/api/embeddings", "/api/v1/mcp/servers"}
+	want := []string{"/v1/tools/servers", "/api/embeddings", "/api/v1/mcp/servers"}
 	if !reflect.DeepEqual(paths, want) {
 		t.Errorf("upstream paths = %v, want %v", paths, want)
 	}
@@ -644,12 +644,10 @@ func TestProxyPassThroughToolsAndEmbeddings(t *testing.T) {
 func TestProxyPassThroughRejectsUnknownRoutes(t *testing.T) {
 	u := newProxyTestUpstream(t)
 	s := newProxyTestServer(t, proxyTestConfig(u, "alpha"))
-	for _, path := range []string{"/v1/random", "/v1/tools", "/api/tools/servers"} {
-		method := http.MethodPost
-		if path == "/v1/tools" {
-			method = http.MethodPost
-		}
-		requireProxyStatus(t, proxyTestRequest(t, s, method, path, "{}", testProxyKey, ""), 404)
+	// /api/<anything> is intentionally forwarded verbatim so new upstream routes
+	// work without a proxy release; only truly foreign prefixes are rejected.
+	for _, path := range []string{"/v1/random", "/v2/tools", "/webhooks/unknown"} {
+		requireProxyStatus(t, proxyTestRequest(t, s, http.MethodPost, path, "{}", testProxyKey, ""), 404)
 	}
 }
 
