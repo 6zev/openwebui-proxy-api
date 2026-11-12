@@ -326,8 +326,11 @@ func TestOTAHTTPSEnforcementAndRedirects(t *testing.T) {
 			f := otaNewFixture(t)
 			f.manifest.Assets[0].URL = f.server.URL + path
 			f.resign(t)
-			if err := f.runner.run([]string{"update"}); err == nil || !strings.Contains(err.Error(), "302") {
-				t.Fatalf("followed redirect: %v", err)
+			// Test hosts are intentionally outside the trusted redirect allow-list,
+			// which is exactly the downgrade/third-party case that must fail.
+			err := f.runner.run([]string{"update"})
+			if err == nil || (!strings.Contains(err.Error(), "untrusted host") && !strings.Contains(err.Error(), "HTTPS")) {
+				t.Fatalf("followed a disallowed redirect: %v", err)
 			}
 			if f.downloads.Load() != 0 {
 				t.Fatal("redirect was followed")
@@ -335,6 +338,23 @@ func TestOTAHTTPSEnforcementAndRedirects(t *testing.T) {
 			otaAssertFile(t, f.runner.executable, f.old)
 		})
 	}
+	t.Run("allow-list", func(t *testing.T) {
+		for raw := range map[string]bool{
+			"https://github.com/owner/repo/releases/download/v1/x": true,
+			"https://objects.githubusercontent.com/x":              true,
+			"https://release-assets.githubusercontent.com/x":       true,
+			"http://github.com/x":                                  false,
+			"https://evil.example.com/x":                           false,
+			"https://github.com.evil.example.com/x":                false,
+			"https://user:pw@github.com/x":                         false,
+		} {
+			_, err := otaRedirectTarget(raw)
+			want := strings.HasPrefix(raw, "https://github.com/") || strings.HasPrefix(raw, "https://objects.githubusercontent.com/") || strings.HasPrefix(raw, "https://release-assets.githubusercontent.com/")
+			if (err == nil) != want {
+				t.Errorf("otaRedirectTarget(%q) error = %v, want allowed = %t", raw, err, want)
+			}
+		}
+	})
 }
 func TestOTASemver(t *testing.T) {
 	for _, tc := range []struct {

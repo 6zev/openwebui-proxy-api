@@ -46,15 +46,37 @@ type otaAsset struct {
 	Size   int64  `json:"size"`
 }
 
+// defaultOTAManifestURL resolves to the newest published GitHub Release, so an
+// upgrade never needs a hand-edited tag. ExpectedOTAKey pins the signing key that
+// matches it; replacing one without the other makes updates fail closed.
+const defaultOTAManifestURL = "https://github.com/6zev/openwebui-proxy-api/releases/latest/download/manifest.json"
+
+var ExpectedOTAKey = "gdwbJrzsMFrboQ9Z8BZYLQtS/HiM0FYHNaIjjPu69WU="
+
+func otaPublicKey() (ed25519.PublicKey, error) {
+	raw := os.Getenv("OTA_PUBLIC_KEY")
+	if raw == "" {
+		raw = ExpectedOTAKey
+	}
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(raw))
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return nil, errors.New("OTA_PUBLIC_KEY must be a base64 Ed25519 public key")
+	}
+	return ed25519.PublicKey(key), nil
+}
+
 func runOTA(args []string) error {
 	r := otaRunner{version: Version, out: os.Stdout}
 	if len(args) == 1 && (args[0] == "check" || args[0] == "update") {
 		r.manifestURL = os.Getenv("OTA_MANIFEST_URL")
-		key, err := base64.StdEncoding.DecodeString(os.Getenv("OTA_PUBLIC_KEY"))
-		if err != nil || len(key) != ed25519.PublicKeySize {
-			return errors.New("OTA_PUBLIC_KEY must be a base64 Ed25519 public key")
+		if r.manifestURL == "" {
+			r.manifestURL = defaultOTAManifestURL
 		}
-		r.publicKey = ed25519.PublicKey(key)
+		key, err := otaPublicKey()
+		if err != nil {
+			return err
+		}
+		r.publicKey = key
 	}
 	return r.run(args)
 }
@@ -177,14 +199,43 @@ func otaParseManifest(raw []byte) (otaManifest, error) {
 	return m, nil
 }
 
-// Even injected clients have redirects disabled; the injection changes only the
-// trusted CA/transport for tests, never the URL policy.
+// GitHub Releases answers "/latest/download" and asset URLs with a redirect to
+// its CDN. Only HTTPS hops to an explicit allow-list are followed, so a signed
+// manifest cannot smuggle a downgrade or an arbitrary third-party host.
+var otaRedirectHosts = map[string]bool{
+	"github.com":                           true,
+	"objects.githubusercontent.com":        true,
+	"release-assets.githubusercontent.com": true,
+}
+
+func otaRedirectTarget(raw string) (*url.URL, error) {
+	if err := otaHTTPS(raw); err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	if !otaRedirectHosts[strings.ToLower(u.Hostname())] {
+		return nil, fmt.Errorf("OTA redirect to an untrusted host (%s) is not allowed", u.Hostname())
+	}
+	return u, nil
+}
+
+// Even injected clients keep the same redirect policy; the injection changes
+// only the trusted CA/transport for tests, never the URL rules.
 func (r otaRunner) httpClient() *http.Client {
 	c := http.Client{Timeout: 5 * time.Minute}
 	if r.client != nil {
 		c = *r.client
 	}
-	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many OTA redirects")
+		}
+		_, err := otaRedirectTarget(req.URL.String())
+		return err
+	}
 	if c.Timeout == 0 {
 		c.Timeout = 5 * time.Minute
 	}
@@ -201,7 +252,7 @@ func (r otaRunner) get(raw string) (*http.Response, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, fmt.Errorf("OTA HTTP status %d (redirects are disabled)", resp.StatusCode)
+		return nil, fmt.Errorf("OTA HTTP status %d", resp.StatusCode)
 	}
 	return resp, nil
 }

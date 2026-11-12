@@ -85,12 +85,16 @@ jobs:
 
           Linux binaries: \`openwebui-proxy_${VERSION}_linux_amd64\` and \`openwebui-proxy_${VERSION}_linux_arm64\`.
 
-          Client configuration:
+          OTA needs no client configuration: binaries default to
+          https://github.com/${REPO}/releases/latest/download/manifest.json and
+          the pinning Ed25519 public key is embedded in the build.
 
-          \`\`\`dotenv
-          OTA_MANIFEST_URL=https://github.com/${REPO}/releases/download/${VERSION}/manifest.json
-          OTA_PUBLIC_KEY=<your base64 Ed25519 public key>
-          \`\`\`
+          Manual OTA commands:
+
+          ```
+          ./openwebui-proxy ota check
+          ./openwebui-proxy ota update
+          ```
           EOF
           )
           gh release create "$VERSION" \

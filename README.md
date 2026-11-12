@@ -249,14 +249,19 @@ OTA được kích hoạt **bằng lệnh CLI**, không tự tải/chạy code n
 
 ### Trên máy đang chạy proxy
 
-Cấu hình `.env` theo bản phát hành của repo này:
+**Không cần cấu hình gì.** Binary đã nhúng sẵn:
 
-```dotenv
-OTA_MANIFEST_URL=https://github.com/6zev/openwebui-proxy-api/releases/download/v0.2.0/manifest.json
-OTA_PUBLIC_KEY=gdwbJrzsMFrboQ9Z8BZYLQtS/HiM0FYHNaIjjPu69WU=
+- `OTA_MANIFEST_URL` mặc định → `https://github.com/6zev/openwebui-proxy-api/releases/latest/download/manifest.json` (tag mới tự nằm ở `latest`, không phải sửa URL mỗi bản)
+- `OTA_PUBLIC_KEY` mặc định → `gdwbJrzsMFrboQ9Z8BZYLQtS/HiM0FYHNaIjjPu69WU=`, gắn cứng trong code bằng `ExpectedOTAKey`
+
+```bash
+./openwebui-proxy ota check
+./openwebui-proxy ota update
 ```
 
-Khi có bản mới, đổi URL sang tag tương ứng. Public key dùng cho các bản phát hành qua GitHub Actions; giữ private key tương ứng trong secret `OTA_PRIVATE_KEY_B64`. Nếu tự tạo khóa riêng, thay cả hai giá trị.
+Chỉ đặt `OTA_MANIFEST_URL`/`OTA_PUBLIC_KEY` khi tự vận hành server phát hành hoặc xoay khóa: biến môi trường luôn thắng giá trị nhúng. Xoay khóa thì phải đổi **cả** `ExpectedOTAKey` trong `ota.go` và secret `OTA_PRIVATE_KEY_B64`, nếu không update sẽ dừng vì sai chữ ký (fail closed).
+
+Redirect chỉ được theo khi đích vẫn là HTTPS và thuộc `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, tối đa 5 bước — GitHub dùng redirect này cho `/latest/download` và asset CDN.
 
 ```bash
 ./openwebui-proxy version
