@@ -19,9 +19,14 @@ var surfaceMappings = []surfaceMapping{
 	// (model normalization, streaming, selection) and are only listed so the
 	// generic forwarder can still serve them when reached.
 	{"/v1/embeddings/", ""},
+	// OpenAI Responses API. Open WebUI mounts its OpenAI router under /openai,
+	// so /openai/responses (and the generic /openai/{path} catch-all) is the only
+	// place that implements it; bare /v1/responses answers 405 upstream.
+	{"/v1/responses", "/openai/responses"},
+	{"/v1/responses/", "/openai/responses/"},
+
 	// Open WebUI mounts the Anthropic Messages API at /api/v1/messages only; its
-	// bare /v1/messages route answers 405. The OpenAI Responses API is not
-	// implemented upstream, so it is intentionally absent (returns 404).
+	// bare /v1/messages route answers 405.
 	{"/v1/messages", "/api/v1/messages"},
 	{"/v1/messages/count_tokens", "/api/v1/messages/count_tokens"},
 	{"/v1/files/", ""},
@@ -40,6 +45,9 @@ var surfaceMappings = []surfaceMapping{
 	// Ollama native pass-through (/ollama/<api>) plus its OpenAI shim.
 	{"/ollama/", ""},
 
+	// Upstream OpenAI router (models, chat/completions, audio/speech, responses…).
+	{"/openai/", ""},
+
 	// Anything already addressed at the upstream prefix is served verbatim.
 	{"/api/", ""},
 }
@@ -54,9 +62,12 @@ func mapSurfacePath(path string) (string, bool) {
 	}
 	for _, mapping := range surfaceMappings {
 		if strings.HasSuffix(mapping.prefix, "/") && strings.HasPrefix(path, mapping.prefix) {
-			// Deeper routes under an allowed prefix are forwarded verbatim so new
-			// upstream endpoints keep working without a proxy release.
-			return mapping.target, true
+			// Prefix entries translate the matched prefix and keep the remainder so
+			// new upstream endpoints keep working without a proxy release.
+			if mapping.target == "" {
+				return "", true
+			}
+			return mapping.target + strings.TrimPrefix(path, mapping.prefix), true
 		}
 	}
 	return "", false

@@ -19,7 +19,8 @@ func TestMapSurfacePath(t *testing.T) {
 		{"/v1/embeddings/2", "", true},
 		{"/v1/messages", "/api/v1/messages", true},
 		{"/v1/messages/count_tokens", "/api/v1/messages/count_tokens", true},
-		{"/v1/responses", "", false},
+		{"/v1/responses", "/openai/responses", true},
+		{"/v1/responses/resp_1", "/openai/responses/resp_1", true},
 		{"/v1/tools/list", "/api/v1/tools/list", true},
 		{"/v1/tools/id/abc/specs", "", true},
 		{"/v1/mcp", "/api/v1/mcp/servers", true},
@@ -64,6 +65,8 @@ func surfaceUpstream(t *testing.T) (*proxyTestUpstream, map[string]string) {
 			_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant"}`)
 		case "/ollama/api/tags":
 			_, _ = io.WriteString(w, `{"models":[{"name":"llama"}]}`)
+		case "/openai/responses":
+			_, _ = io.WriteString(w, `{"id":"resp_1","object":"response","status":"completed"}`)
 		case "/api/v1/models/all":
 			_, _ = io.WriteString(w, `{"data":[{"id":"x"}]}`)
 		default:
@@ -81,6 +84,8 @@ func TestProxyForwardsAnthropicOllamaAndAdminSurfaces(t *testing.T) {
 
 		{"GET", "/ollama/api/tags", "", "/ollama/api/tags"},
 		{"GET", "/api/v1/models/all", "", "/api/v1/models/all"},
+		{"POST", "/v1/responses", `{"model":"m","input":"hi"}`, "/openai/responses"},
+		{"GET", "/openai/models", "", "/openai/models"},
 		{"GET", "/api/version", "", "/api/version"},
 		{"POST", "/v1/embeddings/1", `{"input":"x"}`, "/v1/embeddings/1"},
 	}
@@ -143,7 +148,7 @@ func TestProxySurfacePinsAccount(t *testing.T) {
 func TestSurfaceAllowListMatchesDocs(t *testing.T) {
 	// Guard the advertised surface so a refactor cannot silently drop support.
 	// chat/completions and models have dedicated proxy paths, not generic ones.
-	required := []string{"/v1/embeddings", "/v1/messages", "/v1/messages/count_tokens", "/v1/tools/list", "/v1/mcp/servers", "/ollama/api/tags", "/api/v1/models/all"}
+	required := []string{"/v1/embeddings", "/v1/messages", "/v1/messages/count_tokens", "/v1/responses", "/v1/tools/list", "/v1/mcp/servers", "/ollama/api/tags", "/openai/responses", "/api/v1/models/all"}
 	for _, path := range required {
 		if _, ok := mapSurfacePath(path); !ok {
 			t.Errorf("advertised surface %q is not routed", path)

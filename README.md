@@ -181,10 +181,12 @@ Proxy expose toàn bộ surface chính thức của Open WebUI qua cùng một k
 | --- | --- | --- |
 | OpenAI | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/embeddings(/{idx})`, `GET /v1/files/…`, `GET /v1/tools/…`, `GET /v1/mcp/…`, `GET /v1/knowledge/…`, `GET /v1/audio/…` | `/api/v1/…` (chat/models có xử lý riêng: chuẩn hoá model, streaming, chọn acc) |
 | Anthropic Messages | `POST /v1/messages`, `POST /v1/messages/count_tokens` | `/api/v1/messages…` |
+| OpenAI Responses | `POST /v1/responses`, `GET|POST /v1/responses/{id}` | `/openai/responses…` |
 | Ollama native | `/ollama/api/*` (tags, chat, generate, embed, ps, version…) | `/ollama/api/*` verbatim |
+| Upstream OpenAI router | `/openai/*` (models, chat/completions, audio/speech, responses) | verbatim |
 | Admin/utility | `/api/version`, `/api/config`, `/api/chats/…`, `/api/v1/models/all`, `/api/v1/utils/pdf`, `/api/v1/retrieval/…` | `/api/…` verbatim |
 
-- `POST /v1/responses` **không** được map vì Open WebUI chưa triển khai Responses API (upstream trả `404/405`).
+- Responses API nằm ở `/openai/responses` trên upstream (router OpenAI mount tại prefix `/openai`); `/v1/responses` phía proxy được map sang đó, hỗ trợ cả non-stream và `stream: true` (SSE). Payload PHẢI dùng `input`, **không** dùng `messages` — gửi `messages` sẽ nhận lỗi từ provider. Lưu ý payload được chuyển nguyên văn, không dịch giữa chat-completions và responses.
 - Path không thuộc allow-list trả `404 Endpoint not found` — proxy không blind-forward.
 - Tool call và request có tác dụng phụ không failover sang acc khác sau khi đã gửi.
 
