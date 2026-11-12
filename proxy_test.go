@@ -481,7 +481,18 @@ func TestProxyTimeout(t *testing.T) {
 	cfg.Timeout = 40 * time.Millisecond
 	s := newProxyTestServer(t, cfg)
 	requireProxyStatus(t, proxyTestRequest(t, s, http.MethodPost, "/v1/chat/completions", testChatBody, testProxyKey, ""), http.StatusGatewayTimeout)
-	_, records := u.snapshot()
+	// The proxy must never re-send generation after a timeout. The upstream may
+	// record the call slightly after the client timeout fires, so poll briefly
+	// instead of asserting an exact instantaneous count.
+	deadline := time.Now().Add(2 * time.Second)
+	var records []proxyTestRecord
+	for time.Now().Before(deadline) {
+		_, records = u.snapshot()
+		if len(records) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if len(records) != 1 || records[0].ID != "alpha" {
 		t.Errorf("timeout retried generation: %v", records)
 	}
@@ -566,5 +577,101 @@ func TestProxyConcurrentLoginCache(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProxyPassThroughToolsAndEmbeddings(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	var seen []proxyTestRecord
+	u.onChat = func(_ string, _ int, w http.ResponseWriter, _ *http.Request, _ map[string]any) bool { return false }
+	u.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auths/signin" {
+			_, _ = io.WriteString(w, `{"token":"t"}`)
+			return
+		}
+		body := map[string]any{}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
+		u.mu.Lock()
+		u.records = append(u.records, proxyTestRecord{ID: "t", Path: r.URL.Path, Authorization: r.Header.Get("Authorization"), Body: body})
+		u.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/tools/servers":
+			_, _ = io.WriteString(w, `{"data":[{"id":"mcp-1","type":"mcp"}]}`)
+		case r.URL.Path == "/api/v1/embeddings" || r.URL.Path == "/api/embeddings":
+			_, _ = io.WriteString(w, `{"data":[{"embedding":[0.1]}]}`)
+		default:
+			_, _ = io.WriteString(w, `{"ok":true}`)
+		}
+	})
+	s := newProxyTestServer(t, proxyTestConfig(u, "alpha"))
+
+	resp := proxyTestRequest(t, s, http.MethodGet, "/v1/tools/servers", "", testProxyKey, "")
+	requireProxyStatus(t, resp, 200)
+	if !strings.Contains(resp.body, "mcp-1") {
+		t.Errorf("tool server list not forwarded: %s", resp.body)
+	}
+
+	embedding := `{"model":"m","input":"hello"}`
+	resp = proxyTestRequest(t, s, http.MethodPost, "/v1/embeddings", embedding, testProxyKey, "")
+	requireProxyStatus(t, resp, 200)
+	if !strings.Contains(resp.body, "embedding") {
+		t.Errorf("embeddings not forwarded: %s", resp.body)
+	}
+
+	resp = proxyTestRequest(t, s, http.MethodPost, "/v1/mcp/servers", `{"name":"x"}`, testProxyKey, "")
+	requireProxyStatus(t, resp, 200)
+
+	_ = seen
+	_, records := u.snapshot()
+	var paths []string
+	for _, r := range records {
+		paths = append(paths, r.Path)
+	}
+	want := []string{"/api/v1/tools/servers", "/api/embeddings", "/api/v1/mcp/servers"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Errorf("upstream paths = %v, want %v", paths, want)
+	}
+	for _, r := range records {
+		if r.Authorization != "Bearer t" {
+			t.Errorf("tool request not authenticated with account token: %q", r.Authorization)
+		}
+	}
+}
+
+func TestProxyPassThroughRejectsUnknownRoutes(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	s := newProxyTestServer(t, proxyTestConfig(u, "alpha"))
+	for _, path := range []string{"/v1/random", "/v1/tools", "/api/tools/servers"} {
+		method := http.MethodPost
+		if path == "/v1/tools" {
+			method = http.MethodPost
+		}
+		requireProxyStatus(t, proxyTestRequest(t, s, method, path, "{}", testProxyKey, ""), 404)
+	}
+}
+
+func TestProxyChatForwardsToolDefinitions(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	s := newProxyTestServer(t, proxyTestConfig(u, "alpha"))
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"calc","parameters":{"type":"object"}}}],"tool_choice":"auto","features":{"web_search":true,"code_interpreter":true,"image_generation":false}}`
+	resp := proxyTestRequest(t, s, http.MethodPost, "/v1/chat/completions", body, testProxyKey, "")
+	requireProxyStatus(t, resp, 200)
+	_, records := u.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("expected one upstream chat call, got %d", len(records))
+	}
+	got := records[0].Body
+	if _, ok := got["tools"]; !ok {
+		t.Error("tools definition dropped")
+	}
+	if got["tool_choice"] != "auto" {
+		t.Errorf("tool_choice dropped: %v", got["tool_choice"])
+	}
+	features, ok := got["features"].(map[string]any)
+	if !ok || features["web_search"] != true || features["code_interpreter"] != true {
+		t.Errorf("features flags dropped: %v", got["features"])
 	}
 }

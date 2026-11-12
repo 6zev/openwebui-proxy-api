@@ -227,6 +227,15 @@ func remaining(t time.Time) int {
 	return int((d + time.Second - 1) / time.Second)
 }
 func (p *Proxy) candidates(id string) ([]*account, error) { return p.candidatesFor(id, "") }
+func underAny(path string, prefixes ...string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -432,12 +441,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	models := r.Method == http.MethodGet && r.URL.Path == "/v1/models"
 	chat := r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions"
-	if !models && !chat {
+	// OpenAI-compatible embeddings plus upstream Open WebUI tool surfaces
+	// (tool servers / MCP gateways / tool-calling pipelines). JSON is forwarded
+	// to the selected account so Open WebUI keeps ownership of tool execution,
+	// web search and MCP policy.
+	passThrough := false
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/embeddings":
+		passThrough = true
+	case (r.Method == http.MethodGet || r.Method == http.MethodPost) && underAny(r.URL.Path,
+		"/v1/tools/", "/v1/mcp/", "/v1/knowledge/", "/v1/files/"):
+		passThrough = true
+	case r.Method == http.MethodGet && (r.URL.Path == "/v1/tools" || r.URL.Path == "/v1/mcp" || r.URL.Path == "/v1/tools/list"):
+		passThrough = true
+	}
+	if !models && !chat && !passThrough {
 		writeError(w, &apiError{404, "Endpoint not found", 0})
 		return
 	}
 	var body []byte
-	if chat {
+	if chat || passThrough {
 		reader := http.MaxBytesReader(w, r.Body, 10<<20)
 		defer reader.Close()
 		var err error
@@ -451,6 +474,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+	}
+	if passThrough {
+		p.forwardBody(w, r, body)
+		return
+	}
+	if chat {
 		var input map[string]json.RawMessage
 		if json.Unmarshal(body, &input) != nil || input == nil {
 			writeError(w, &apiError{400, "Body must be a JSON object", 0})
@@ -571,4 +600,62 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// forwardBody proxies an Open WebUI tool/embeddings/MCP request to one selected
+// account. Upstream owns tool execution, web search and MCP authorization; the
+// proxy only enforces routing, size limits and a sanitized error surface.
+func (p *Proxy) forwardBody(w http.ResponseWriter, r *http.Request, body []byte) {
+	candidates, err := p.candidatesFor(r.Header.Get("X-Account-ID"), r.Header.Get("X-Website-ID"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	upstreamPath := r.URL.Path
+	if !strings.HasPrefix(upstreamPath, "/api/") {
+		if r.URL.Path == "/v1/embeddings" {
+			upstreamPath = "/api/embeddings"
+		} else {
+			upstreamPath = "/api" + r.URL.Path
+			if r.URL.Path == "/v1/mcp" {
+				upstreamPath = "/api/v1/mcp/servers"
+			}
+		}
+	}
+	if r.URL.RawQuery != "" {
+		upstreamPath += "?" + r.URL.RawQuery
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), p.config.Timeout)
+	defer cancel()
+	var response *http.Response
+	for _, a := range candidates {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+			break
+		}
+		w.Header().Set("X-Account-ID", a.config.ID)
+		w.Header().Set("X-Website-ID", a.config.WebsiteID)
+		var retry bool
+		response, err, retry = p.request(ctx, a, upstreamPath, r.Method, body)
+		if err == nil {
+			break
+		}
+		// Only pre-response failures may rotate; tool calls can have side effects.
+		if r.Header.Get("X-Account-ID") != "" || !retry {
+			break
+		}
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer response.Body.Close()
+	contentType := response.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(response.Body, 16<<20))
 }

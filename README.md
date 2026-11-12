@@ -173,6 +173,32 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"YOUR_MODEL_ID","messages":[{"role":"user","content":"Giới thiệu ngắn về bạn"}],"stream":true}'
 ```
 
+### Tool calling, Web Search, MCP và embeddings
+
+Proxy chuyển tiếp nguyên vẹn tham số OpenAI nên các tính năng của Open WebUI hoạt động bình thường:
+
+```bash
+# Tool calling / function calling
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Authorization: Bearer YOUR_PROXY_KEY' -H 'Content-Type: application/json' \
+  -d '{"model":"MODEL","messages":[{"role":"user","content":"Tính 7+5"}],
+       "tools":[{"type":"function","function":{"name":"calc","parameters":{"type":"object"}}}],
+       "tool_choice":"auto",
+       "features":{"web_search":true,"code_interpreter":true,"image_generation":false}}'
+```
+
+| Endpoint | Chuyển tới Open WebUI | Ghi chú |
+| --- | --- | --- |
+| `POST /v1/chat/completions` | `/api/chat/completions` | `tools`, `tool_choice`, `features.web_search`, `code_interpreter`, `image_generation`, `files`, `metadata` được giữ nguyên |
+| `POST /v1/embeddings` | `/api/embeddings` | Phụ thuộc embedding engine của Open WebUI |
+| `GET /v1/tools/list` | `/api/v1/tools/list` | Danh sách tool; cần quyền Workspace → Tools |
+| `GET /v1/mcp` | `/api/v1/mcp/servers` | Danh sách MCP server (phiên bản Open WebUI có MCP) |
+| `/v1/knowledge/…`, `/v1/files/…` | `/api/v1/…` | RAG / knowledge / file của Open WebUI |
+
+- Tool execution, web search, MCP authorization và RAG đều do **Open WebUI** thực hiện; proxy chỉ định tuyến website/acc, giới hạn body 10 MiB và ẩn lỗi nội bộ.
+- Request tool **không tự failover sang acc khác** sau khi đã gửi, vì tool call có thể gây tác dụng phụ.
+- Endpoint chưa tồn tại trên upstream (ví dụ `/v1/mcp` với bản Open WebUI không có MCP) sẽ trả lỗi upstream, không bị giả lập.
+
 ### Python OpenAI SDK
 
 ```python
