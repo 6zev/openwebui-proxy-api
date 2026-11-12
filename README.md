@@ -265,8 +265,12 @@ Redirect chỉ được theo khi đích vẫn là HTTPS và thuộc `github.com`
 
 ```bash
 ./openwebui-proxy version
-./openwebui-proxy ota check
-./openwebui-proxy ota update
+./openwebui-proxy check     # chỉ xem có bản mới không
+./openwebui-proxy update    # tải, xác minh chữ ký, cài đặt
+./openwebui-proxy rollback  # quay về binary trước
+```
+
+`update`/`check`/`rollback` là lệnh cấp cao; dạng tương đương `ota check|update|rollback` vẫn dùng được.
 # Dừng tiến trình cũ và khởi động lại bằng cách bạn đã triển khai.
 # Nếu đang dùng systemd với tên service tương ứng:
 sudo systemctl restart openwebui-proxy

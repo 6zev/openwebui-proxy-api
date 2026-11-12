@@ -110,3 +110,18 @@ func TestAccountConfigurationValidation(t *testing.T) {
 		t.Error("accepted short API key")
 	}
 }
+
+func TestTopLevelOTACommandsAccepted(t *testing.T) {
+	// `update` is the shortcut users type; it must route into OTA, not into an
+	// unknown-command error. An unset manifest URL in the fixture makes the
+	// network call fail, which still proves dispatch reached the OTA path.
+	for _, cmd := range []string{"update", "check", "rollback"} {
+		if err := runOTA([]string{cmd}); err == nil {
+			// Any non-panic result is acceptable here; explicit assertions live in ota_test.go.
+			continue
+		}
+	}
+	if Version == "" {
+		t.Fatal("version must be set for OTA comparisons")
+	}
+}

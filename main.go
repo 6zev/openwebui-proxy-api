@@ -161,12 +161,24 @@ func run() error {
 			return nil
 		case "ota":
 			return runOTA(args[1:])
+		case "update", "check", "rollback":
+			// Top-level shortcuts: `openwebui-proxy update` is all a host needs,
+			// because the manifest URL and signing key are already pinned.
+			return runOTA(args)
 		case "serve":
 			if len(args) > 1 {
-				return errors.New("usage: openwebui-proxy [serve|version|ota]")
+				return errors.New("usage: openwebui-proxy [serve|version|update|check|rollback|ota ...]")
 			}
 		case "help", "--help", "-h":
-			fmt.Println("Usage: openwebui-proxy [serve|version|ota check|ota update|ota rollback|ota keygen|ota sign]\nServer configuration is read from environment and .env. See README.md.")
+			fmt.Println(`Usage:
+  openwebui-proxy              start the proxy and WebUI
+  openwebui-proxy update       download, verify and install the latest release
+  openwebui-proxy check        show whether a newer release exists
+  openwebui-proxy rollback     restore the previous binary
+  openwebui-proxy version      print the current version
+  openwebui-proxy ota ...      explicit OTA subcommands (check/update/rollback/keygen/sign)
+
+Server configuration is read from environment and .env. See README.md.`)
 			return nil
 		default:
 			return errors.New("unknown command; use --help")
