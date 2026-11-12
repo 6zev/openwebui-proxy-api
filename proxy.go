@@ -76,10 +76,23 @@ func validBaseURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && len(raw) <= 4096 && u.Hostname() != "" && (u.Scheme == "http" || u.Scheme == "https") && u.User == nil && u.RawQuery == "" && !u.ForceQuery && u.Fragment == ""
 }
+
+// minAPIKeyLength is intentionally low so a local install can use a short key.
+// Run the proxy behind HTTPS and prefer a long random key when exposed.
+const minAPIKeyLength = 5
+
+// Display names are optional: fall back to the ID so lists stay readable.
+func displayName(id, name string) string {
+	if strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name)
+	}
+	return id
+}
+
 func NewProxy(c Config) (*Proxy, error) { return buildProxy(c, false) }
 func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
-	if len(c.APIKey) < 24 {
-		return nil, errors.New("PROXY_API_KEY must contain at least 24 characters")
+	if len(c.APIKey) < minAPIKeyLength {
+		return nil, fmt.Errorf("PROXY_API_KEY must contain at least %d characters", minAPIKeyLength)
 	}
 	if !allowEmpty && len(c.Accounts) == 0 {
 		return nil, errors.New("configure at least one account")
@@ -107,7 +120,7 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 			return nil, fmt.Errorf("duplicate website ID: %s", s.ID)
 		}
 		if len(s.Name) > 160 || !validBaseURL(s.BaseURL) {
-			return nil, fmt.Errorf("website %s requires a valid HTTP(S) URL and a short name", s.ID)
+			return nil, fmt.Errorf("website %s requires a valid HTTP(S) URL (name is optional)", s.ID)
 		}
 		client, err := newOutboundClient(s.ProxyURL, c.Timeout)
 		if err != nil {
@@ -115,6 +128,7 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 		}
 		client.CloseIdleConnections()
 		s.BaseURL = strings.TrimRight(s.BaseURL, "/")
+		s.Name = displayName(s.ID, s.Name)
 		p.sites[s.ID] = s
 	}
 	ids := map[string]bool{}
@@ -127,8 +141,9 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 		}
 		ids[a.ID] = true
 		if a.Email == "" || a.Password == "" || len(a.Email) > 320 || len(a.Password) > 8192 || len(a.Name) > 160 {
-			return nil, fmt.Errorf("account %s requires email, password and a short name", a.ID)
+			return nil, fmt.Errorf("account %s requires email and password (display name is optional)", a.ID)
 		}
+		a.Name = displayName(a.ID, a.Name)
 		proxyURL := a.ProxyURL
 		if a.WebsiteID != "" {
 			s, exists := p.sites[a.WebsiteID]

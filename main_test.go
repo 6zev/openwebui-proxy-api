@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,9 +108,9 @@ func TestAccountConfigurationValidation(t *testing.T) {
 		t.Error("accepted duplicate account IDs")
 	}
 	c = base
-	c.APIKey = "short"
+	c.APIKey = "abc"
 	if _, err := NewProxy(c); err == nil {
-		t.Error("accepted short API key")
+		t.Error("accepted API key under the 5-character minimum")
 	}
 }
 
@@ -123,5 +126,85 @@ func TestTopLevelOTACommandsAccepted(t *testing.T) {
 	}
 	if Version == "" {
 		t.Fatal("version must be set for OTA comparisons")
+	}
+}
+
+func TestShortKeysAndOptionalNames(t *testing.T) {
+	cfg := Config{BaseURL: "https://example.test", APIKey: "abcde", Accounts: []AccountConfig{{ID: "a", Email: "a@example.test", Password: "p"}}}
+	p, err := NewProxy(cfg)
+	if err != nil {
+		t.Fatalf("5-character PROXY_API_KEY rejected: %v", err)
+	}
+	if got := p.accounts[0].config.Name; got != "a" {
+		t.Errorf("empty account name should fall back to ID, got %q", got)
+	}
+	for _, key := range []string{"", "a", "abcd"} {
+		c := cfg
+		c.APIKey = key
+		if _, err := NewProxy(c); err == nil {
+			t.Errorf("accepted PROXY_API_KEY with %d characters", len(key))
+		}
+	}
+	siteCfg := Config{APIKey: "abcde", Websites: []WebsiteConfig{{ID: "s", BaseURL: "https://example.test"}},
+		Accounts: []AccountConfig{{ID: "a", WebsiteID: "s", Email: "a@example.test", Password: "p"}}}
+	sp, err := NewProxy(siteCfg)
+	if err != nil {
+		t.Fatalf("website without name rejected: %v", err)
+	}
+	if sp.sites["s"].Name != "s" {
+		t.Errorf("empty website name should fall back to ID, got %q", sp.sites["s"].Name)
+	}
+	named := Config{APIKey: "abcde", Websites: []WebsiteConfig{{ID: "s", Name: "  ", BaseURL: "https://example.test"}},
+		Accounts: []AccountConfig{{ID: "a", Name: "Tên riêng", WebsiteID: "s", Email: "a@example.test", Password: "p"}}}
+	np, err := NewProxy(named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if np.accounts[0].config.Name != "Tên riêng" {
+		t.Errorf("explicit name not preserved: %q", np.accounts[0].config.Name)
+	}
+}
+
+func TestAdminStateShowsIDWhenNameEmpty(t *testing.T) {
+	cfg := Config{APIKey: "abcde", ConfigPath: t.TempDir() + "/c.json",
+		Websites: []WebsiteConfig{{ID: "site-x", BaseURL: "https://example.test"}},
+		Accounts: []AccountConfig{{ID: "acc-x", WebsiteID: "site-x", Email: "a@example.test", Password: "p"}}}
+	app, err := NewApplication(cfg, "abcde")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/state", nil)
+	request.Header.Set("Authorization", "Bearer abcde")
+	recorder := httptest.NewRecorder()
+	app.ServeHTTP(recorder, request)
+	var state struct {
+		Websites []struct {
+			Name string `json:"name"`
+		} `json:"websites"`
+		Accounts []struct {
+			Name string `json:"name"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if state.Websites[0].Name != "site-x" || state.Accounts[0].Name != "acc-x" {
+		t.Errorf("unnamed entities should display their ID, got %+v", state)
+	}
+}
+
+func TestAdminKeyAllowsFiveCharacters(t *testing.T) {
+	cfg := Config{APIKey: "proxy-key-123456", ConfigPath: t.TempDir() + "/config.json"}
+	if _, err := NewApplication(cfg, "abcde"); err != nil {
+		t.Fatalf("5-character ADMIN_API_KEY rejected: %v", err)
+	}
+	// An empty admin key intentionally falls back to PROXY_API_KEY.
+	if _, err := NewApplication(cfg, ""); err != nil {
+		t.Errorf("empty admin key should fall back to the proxy key: %v", err)
+	}
+	for _, key := range []string{"abcd"} {
+		if _, err := NewApplication(cfg, key); err == nil {
+			t.Errorf("accepted admin key %q (len %d)", key, len(key))
+		}
 	}
 }

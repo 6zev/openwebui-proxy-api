@@ -350,7 +350,6 @@
     const context = { ...editor };
     const current = session;
     const body = { name: $('entity-name').value.trim(), enabled: $('entity-enabled').checked };
-    if (!body.name) { showError('editor-error', 'Vui lòng nhập tên hiển thị.'); return; }
     if (!context.id) body.id = $('entity-id').value;
     if (!/^[A-Za-z0-9_.-]{1,64}$/.test(context.id || body.id)) { showError('editor-error', 'ID không hợp lệ.'); return; }
     if (context.kind === 'website') {

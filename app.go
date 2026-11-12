@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -38,8 +39,8 @@ func NewApplication(cfg Config, adminKey string) (*Application, error) {
 	if adminKey == "" {
 		adminKey = cfg.APIKey
 	}
-	if len(adminKey) < 24 {
-		return nil, errors.New("ADMIN_API_KEY must contain at least 24 characters")
+	if len(adminKey) < minAPIKeyLength {
+		return nil, fmt.Errorf("ADMIN_API_KEY must contain at least %d characters", minAPIKeyLength)
 	}
 	proxy, err := buildProxy(cfg, true)
 	if err != nil {
@@ -71,7 +72,7 @@ func (a *Application) state(w http.ResponseWriter) {
 	sites := make([]map[string]any, 0, len(cfg.Websites))
 	accounts := make([]map[string]any, 0, len(cfg.Accounts))
 	for _, s := range cfg.Websites {
-		sites = append(sites, map[string]any{"id": s.ID, "name": s.Name, "base_url": s.BaseURL, "enabled": !s.Disabled, "proxy_url": redactedProxy(s.ProxyURL), "proxy_configured": s.ProxyURL != ""})
+		sites = append(sites, map[string]any{"id": s.ID, "name": displayName(s.ID, s.Name), "base_url": s.BaseURL, "enabled": !s.Disabled, "proxy_url": redactedProxy(s.ProxyURL), "proxy_configured": s.ProxyURL != ""})
 	}
 	for _, c := range cfg.Accounts {
 		available := false
@@ -83,7 +84,7 @@ func (a *Application) state(w http.ResponseWriter) {
 				break
 			}
 		}
-		accounts = append(accounts, map[string]any{"id": c.ID, "name": c.Name, "website_id": c.WebsiteID, "email": c.Email, "enabled": !c.Disabled, "has_password": c.Password != "", "proxy_url": redactedProxy(c.ProxyURL), "proxy_configured": c.ProxyURL != "", "available": available, "cooldown_seconds": cooldown})
+		accounts = append(accounts, map[string]any{"id": c.ID, "name": displayName(c.ID, c.Name), "website_id": c.WebsiteID, "email": c.Email, "enabled": !c.Disabled, "has_password": c.Password != "", "proxy_url": redactedProxy(c.ProxyURL), "proxy_configured": c.ProxyURL != "", "available": available, "cooldown_seconds": cooldown})
 	}
 	writeJSON(w, 200, map[string]any{"version": Version, "revision": revision, "persistent": cfg.ConfigPath != "", "websites": sites, "accounts": accounts, "api_base_path": "/v1"})
 }

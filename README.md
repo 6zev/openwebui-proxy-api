@@ -20,8 +20,8 @@ Yêu cầu **Go 1.23+** hoặc Docker Compose. Không cần cài dependency; mod
 ```bash
 cp .env.example .env
 chmod 600 .env
-openssl rand -hex 32   # PROXY_API_KEY
-openssl rand -hex 32   # ADMIN_API_KEY (nên khác khóa proxy)
+openssl rand -hex 32   # PROXY_API_KEY (tối thiểu 5 ký tự, dài cho an toàn)
+openssl rand -hex 32   # ADMIN_API_KEY (tối thiểu 5 ký tự, nên khác khóa proxy)
 ```
 
 ```dotenv
@@ -57,8 +57,9 @@ WebUI ghi file này tự động; có thể sửa tay khi proxy đang dừng:
 }
 ```
 
-- `websites[]` mỗi phần tử là một Open WebUI độc lập: `id`, `name`, `base_url`, `proxy_url` tùy chọn, `disabled` tùy chọn.
+- `websites[]` mỗi phần tử là một Open WebUI độc lập: `id` (bắt buộc), `name` (tùy chọn, trống sẽ hiển thị ID), `base_url`, `proxy_url` tùy chọn, `disabled` tùy chọn.
 - `accounts[]` gắn với một website qua `website_id`; `proxy_url` tùy chọn ghi đè proxy của website. `base_url` chỉ dùng cho tài khoản legacy không có `website_id`.
+- `name` của tài khoản cũng tùy chọn; để trống sẽ dùng `id`. **Độ dài tối thiểu của `PROXY_API_KEY`/`ADMIN_API_KEY` là 5 ký tự** — đủ cho cài đặt nội bộ, nhưng hãy đặt khóa dài ngẫu nhiên và chạy sau HTTPS khi mở ra ngoài.
 - ID (website và tài khoản) là duy nhất toàn cục, `1–64` ký tự ASCII: chữ, số, `.`, `_`, `-`. Không sửa ID sau khi tạo.
 - URL có thể chứa tiền tố đường dẫn như `/webui`. Giữ xác minh TLS; dùng HTTPS khi upstream ở máy khác.
 - Chạy trực tiếp sẽ tự đọc `.env` trong thư mục hiện tại; biến môi trường của tiến trình **ưu tiên hơn** `.env`. Parser hỗ trợ `KEY=value`, dấu nháy đơn/đôi và dòng comment bắt đầu bằng `#`; không nội suy `$VARIABLE`. Compose có quy tắc nội suy riêng: đặt giá trị nhạy cảm trong dấu nháy đơn nếu có `$`.
@@ -67,6 +68,8 @@ WebUI ghi file này tự động; có thể sửa tay khi proxy đang dừng:
 - `DEFAULT_MODEL` tùy chọn, là model ID dùng khi request không chỉ định model. Mặc định host `127.0.0.1`, port `8080`, timeout `300000` ms, cooldown `60` giây.
 
 Đừng đưa `.env` hoặc `data/` lên Git hay gửi mật khẩu trong cuộc trò chuyện. Các file này đã được loại khỏi Git và Docker build context.
+
+Key có thể ngắn từ 5 ký tự và tên hiển thị là tùy chọn (trống thì dùng ID); hãy đặt khóa ngẫu nhiên dài và chạy sau HTTPS khi mở ra ngoài.
 
 ## 2. Khởi động
 
@@ -349,7 +352,7 @@ go test -race ./...
 
 GitHub Actions hiện có: `ci` (gofmt/vet/race test trên mỗi push) và `release` (build + ký + tạo Release). Bản `v0.2.0` đã phát hành qua action; asset tải về đã xác minh SHA-256 khớp manifest, chữ ký Ed25519 hợp lệ và binary amd64 chạy in ra `v0.2.0`.
 
-Đã chạy thành công **93 bài test (gồm test con)** bằng race detector, cùng `go vet ./...`: proxy nhiều website, round-robin và ghim nguồn, token riêng, HTTP proxy có xác thực, SOCKS5, hủy/đứt SSE, WebUI/API quản trị (CRUD, phân quyền, chống cross-origin, ẩn secrets, lưu nguyên tử, chạy nền khi ghi lỗi), dotenv và OTA có chữ ký.
+Đã chạy thành công **98 bài test (gồm test con)** bằng race detector, cùng `go vet ./...`: proxy nhiều website, round-robin và ghim nguồn, token riêng, HTTP proxy có xác thực, SOCKS5, hủy/đứt SSE, WebUI/API quản trị (CRUD, phân quyền, chống cross-origin, ẩn secrets, lưu nguyên tử, chạy nền khi ghi lỗi), dotenv và OTA có chữ ký.
 
 WebUI cũng đã được kiểm thử trên **Chromium headless thật**: đăng nhập, tạo hai website, tạo/sửa tài khoản, giữ mật khẩu khi để trống, ẩn mật khẩu khỏi DOM, chặn xóa website còn tài khoản, `401` khi sai khóa, và cấu hình còn nguyên sau khi tải lại trang.
 

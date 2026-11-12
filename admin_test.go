@@ -147,8 +147,11 @@ func TestAdminBootstrapEmptyAndPublicAssets(t *testing.T) {
 
 func TestAdminAuthenticationFallbackAndOrigin(t *testing.T) {
 	cfg := Config{APIKey: testProxyKey}
-	if _, err := NewApplication(cfg, "short"); err == nil {
-		t.Error("short admin key accepted")
+	if _, err := NewApplication(cfg, "abcde"); err != nil {
+		t.Errorf("5-character admin key rejected: %v", err)
+	}
+	if _, err := NewApplication(cfg, "abcd"); err == nil {
+		t.Error("admin key under the 5-character minimum accepted")
 	}
 	s := adminTestServer(t, cfg, adminTestKey)
 	for _, key := range []string{"", "wrong-key", testProxyKey} {
