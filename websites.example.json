@@ -1,0 +1,13 @@
+[
+  {
+    "id": "site-a",
+    "name": "Open WebUI A",
+    "base_url": "https://webui-a.example.com",
+    "proxy_url": "socks5h://127.0.0.1:1080"
+  },
+  {
+    "id": "site-b",
+    "name": "Open WebUI B",
+    "base_url": "https://webui-b.example.com/webui"
+  }
+]

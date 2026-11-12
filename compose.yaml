@@ -1,0 +1,24 @@
+services:
+  proxy:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-v0.2.0}
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      CONFIG_FILE: /app/data/config.json
+    volumes:
+      # Config is written by the WebUI: this directory must stay writable.
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true

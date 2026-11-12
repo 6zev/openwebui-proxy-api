@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+accounts.json
+websites.json
+data/
+/openwebui-proxy
+/openwebui-proxy.exe
+node_modules/
+.dsh-meow/
+/dist/
+/keys/
+*.previous
+*.update.lock
+*.ota-*

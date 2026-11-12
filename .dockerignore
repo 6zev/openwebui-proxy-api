@@ -1,0 +1,17 @@
+.env
+.env.*
+accounts.json
+data
+websites.json
+.dsh-meow
+.git
+node_modules
+legacy
+test
+openwebui-proxy
+openwebui-proxy.exe
+dist
+keys
+*.previous
+*.update.lock
+*.ota-*

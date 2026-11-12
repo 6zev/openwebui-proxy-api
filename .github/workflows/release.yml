@@ -1,0 +1,103 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, vX.Y.Z"
+        required: true
+        default: "v0.2.0"
+        type: string
+      private_key_b64:
+        description: "Optional: base64 of the OTA Ed25519 private key (use the OTA_PRIVATE_KEY_B64 secret normally)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: false
+
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "version must look like vX.Y.Z" >&2; exit 1 ;;
+          esac
+          if ! printf '%s\n' "$VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "version must be strict vX.Y.Z without leading zeros" >&2; exit 1
+          fi
+
+      - name: Format check
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      - name: Build and sign release
+        env:
+          VERSION: ${{ inputs.version }}
+          KEY_B64: ${{ inputs.private_key_b64 || secrets.OTA_PRIVATE_KEY_B64 }}
+        run: |
+          set -eu
+          umask 077
+          keydir=$(mktemp -d)
+          trap 'rm -rf "$keydir"' EXIT
+          printf '%s' "$KEY_B64" | base64 -d > "$keydir/ota-private.key"
+          test -s "$keydir/ota-private.key"
+          chmod 600 "$keydir/ota-private.key"
+          sh scripts/release.sh "$VERSION" "$keydir/ota-private.key" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}"
+          ls -l "dist/$VERSION"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          dir="dist/$VERSION"
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "release $VERSION already exists; refusing to overwrite" >&2
+            exit 1
+          fi
+          notes=$(cat <<EOF
+          Signed OTA release $VERSION. Verify \`manifest.json.sig\` with your OTA Ed25519 public key.
+
+          Linux binaries: \`openwebui-proxy_${VERSION}_linux_amd64\` and \`openwebui-proxy_${VERSION}_linux_arm64\`.
+
+          Client configuration:
+
+          \`\`\`dotenv
+          OTA_MANIFEST_URL=https://github.com/${REPO}/releases/download/${VERSION}/manifest.json
+          OTA_PUBLIC_KEY=<your base64 Ed25519 public key>
+          \`\`\`
+          EOF
+          )
+          gh release create "$VERSION" \
+            "$dir/openwebui-proxy_${VERSION}_linux_amd64" \
+            "$dir/openwebui-proxy_${VERSION}_linux_arm64" \
+            "$dir/manifest.json" \
+            "$dir/manifest.json.sig" \
+            --target "$GITHUB_SHA" \
+            --title "openwebui-proxy $VERSION" \
+            --notes "$notes"

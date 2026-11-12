@@ -1,0 +1,24 @@
+[
+  {
+    "id": "acc-1",
+    "name": "Acc 1 · site A",
+    "website_id": "site-a",
+    "email": "you@example.com",
+    "password": "replace-with-your-password"
+  },
+  {
+    "id": "acc-2",
+    "name": "Acc 2 · site A",
+    "website_id": "site-a",
+    "email": "other@example.com",
+    "password": "replace-with-another-password",
+    "proxy_url": "direct"
+  },
+  {
+    "id": "acc-3",
+    "name": "Acc 3 · site B",
+    "website_id": "site-b",
+    "email": "third@example.com",
+    "password": "replace-with-a-third-password"
+  }
+]
