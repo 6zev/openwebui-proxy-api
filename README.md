@@ -249,12 +249,14 @@ OTA được kích hoạt **bằng lệnh CLI**, không tự tải/chạy code n
 
 ### Trên máy đang chạy proxy
 
-Cấu hình `.env` (thay URL và public key bằng thông tin bản phát hành của bạn):
+Cấu hình `.env` theo bản phát hành của repo này:
 
 ```dotenv
-OTA_MANIFEST_URL=https://updates.example.com/openwebui/manifest.json
-OTA_PUBLIC_KEY=BASE64_ED25519_PUBLIC_KEY
+OTA_MANIFEST_URL=https://github.com/6zev/openwebui-proxy-api/releases/download/v0.2.0/manifest.json
+OTA_PUBLIC_KEY=gdwbJrzsMFrboQ9Z8BZYLQtS/HiM0FYHNaIjjPu69WU=
 ```
+
+Khi có bản mới, đổi URL sang tag tương ứng. Public key dùng cho các bản phát hành qua GitHub Actions; giữ private key tương ứng trong secret `OTA_PRIVATE_KEY_B64`. Nếu tự tạo khóa riêng, thay cả hai giá trị.
 
 ```bash
 ./openwebui-proxy version
@@ -274,6 +276,17 @@ sudo systemctl restart openwebui-proxy
 **Không tự restart tiến trình đang phục vụ.** Sau update/rollback, tiến trình cũ vẫn chạy phiên bản cũ tới khi được restart. Chưa có auto-health rollback hoặc lịch tự cập nhật. Nếu binary mới hỏng tới mức lệnh rollback không chạy được, khôi phục thủ công từ `.previous` rồi restart.
 
 HTTPS bắt buộc cho manifest/chữ ký/binary; redirect bị chặn. Manifest có chữ ký được kiểm tra trên đúng bytes trước khi parse. Chỉ cài phiên bản mới hơn theo dạng `vX.Y.Z`, giới hạn tải 256 MiB. Public key phải lấy từ kênh tin cậy; private key chỉ giữ tại máy ký phát hành. Bản backup và thư mục binary cũng cần được bảo vệ khỏi chỉnh sửa ngoài ý muốn.
+
+### Phát hành qua GitHub Actions
+
+Workflow `.github/workflows/release.yml` chạy thủ công: kiểm tra version, `gofmt`/`go vet`/`go test -race`, build linux `amd64`+`arm64`, ký manifest bằng secret `OTA_PRIVATE_KEY_B64`, rồi tạo GitHub Release (không ghi đè release đã có).
+
+```bash
+gh workflow run release.yml --repo 6zev/openwebui-proxy-api -f version=v0.2.1
+gh run watch --repo 6zev/openwebui-proxy-api
+```
+
+Asset gồm hai binary, `manifest.json` và `manifest.json.sig` — chính là các file `OTA_MANIFEST_URL` trỏ tới. `OTA_PRIVATE_KEY_B64` là base64 của file text private key do `ota keygen` tạo; không đưa khóa vào repo hay log.
 
 ### Tạo bản phát hành của riêng bạn
 
@@ -324,6 +337,8 @@ Lệnh trên build **mã nguồn hiện có**; lấy mã bản mới trước kh
 ```bash
 go test -race ./...
 ```
+
+GitHub Actions hiện có: `ci` (gofmt/vet/race test trên mỗi push) và `release` (build + ký + tạo Release). Bản `v0.2.0` đã phát hành qua action; asset tải về đã xác minh SHA-256 khớp manifest, chữ ký Ed25519 hợp lệ và binary amd64 chạy in ra `v0.2.0`.
 
 Đã chạy thành công **93 bài test (gồm test con)** bằng race detector, cùng `go vet ./...`: proxy nhiều website, round-robin và ghim nguồn, token riêng, HTTP proxy có xác thực, SOCKS5, hủy/đứt SSE, WebUI/API quản trị (CRUD, phân quyền, chống cross-origin, ẩn secrets, lưu nguyên tử, chạy nền khi ghi lỗi), dotenv và OTA có chữ ký.
 
