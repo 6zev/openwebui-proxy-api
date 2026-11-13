@@ -386,6 +386,9 @@
         const apiKey = $('entity-api-key').value.trim();
         if (apiKey) body.api_key = apiKey;
         if (!apiKey && !(context.id && entityHasKey(context.id))) { showError('editor-error', 'Nhập Agent API key cho tài khoản LibreChat.'); return; }
+        // email/password are optional metadata for LibreChat (reuse the same form).
+        body.email = $('entity-email').value.trim();
+        if ($('entity-password').value) body.password = $('entity-password').value;
       } else {
         body.email = $('entity-email').value.trim();
         if ($('entity-password').value) body.password = $('entity-password').value;

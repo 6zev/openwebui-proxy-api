@@ -31,14 +31,25 @@ func TestSplitModelPrefix(t *testing.T) {
 func TestModelPrefixRoutesWithoutOverridingHeaders(t *testing.T) {
 	u := newProxyTestUpstream(t)
 	cfg := proxyTestConfig(u, "alpha", "beta")
+	cfg.Websites = []WebsiteConfig{{ID: "ws", Name: "ws", BaseURL: u.server.URL}}
+	cfg.Accounts = []AccountConfig{
+		{ID: "alpha", WebsiteID: "ws", Email: "alpha@example.test", Password: "password-alpha"},
+		{ID: "beta", WebsiteID: "ws", Email: "beta@example.test", Password: "password-beta"},
+	}
 	cfg.ModelPrefix = true
 	s := newProxyTestServer(t, cfg)
 
-	// Listing exposes "<website-or-account>/<model>".
+	// Default prefix is the website id.
 	list := proxyTestRequest(t, s, http.MethodGet, "/v1/models", "", testProxyKey, "")
 	requireProxyStatus(t, list, 200)
-	if !strings.Contains(list.body, "alpha/test-model") && !strings.Contains(list.body, "beta/test-model") {
-		t.Errorf("model listing missing prefix: %s", list.body)
+	if !strings.Contains(list.body, `"ws/test-model"`) {
+		t.Errorf("model listing missing website prefix: %s", list.body)
+	}
+	// With an account pinned, the prefix becomes the account id.
+	pinned := proxyTestRequest(t, s, http.MethodGet, "/v1/models", "", testProxyKey, "beta")
+	requireProxyStatus(t, pinned, 200)
+	if !strings.Contains(pinned.body, `"beta/test-model"`) {
+		t.Errorf("pinned model listing missing account prefix: %s", pinned.body)
 	}
 
 	// "beta/test-model" pins account beta and strips the prefix upstream.

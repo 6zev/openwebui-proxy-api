@@ -601,13 +601,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			err = ctx.Err()
 			break
 		}
-		// Only prefix model IDs when the deployment opts in (MODEL_PREFIX=1) and
-		// the caller is not already pinning an account, so default output stays
-		// plain OpenAI-compatible.
+		// MODEL_PREFIX=1 exposes "<website-id>/<model>" by default so a client
+		// can route to the website without headers; an explicitly pinned account
+		// (X-Account-ID) switches the prefix to the account id.
 		if p.config.ModelPrefix {
-			selectedPrefix = a.config.ID
-			if r.Header.Get("X-Account-ID") == "" && a.config.WebsiteID != "" {
-				selectedPrefix = a.config.WebsiteID
+			selectedPrefix = a.config.WebsiteID
+			if r.Header.Get("X-Account-ID") != "" && a.config.WebsiteID != "" {
+				selectedPrefix = a.config.ID
 			}
 		}
 		accountPath := path

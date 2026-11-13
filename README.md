@@ -188,6 +188,7 @@ Proxy tự probe từng acc định kỳ để loại acc chết/đăng nhập h
 
 Bật `MODEL_PREFIX=1` thì danh sách model trả ID dạng `"<website-id>/<model>"` (hoặc `"<acc-id>/<model>"` nếu ghim acc), để một OpenAI client gọi `model: "ai/openai/gpt-5.6-luna"` là tự chọn đúng website/acc **mà không cần header** `X-Website-ID`/`X-Account-ID`.
 
+- **Prefix mặc định là website id**: `MODEL_PREFIX=1` trả `"<website-id>/<model>"`; khi caller ghim `X-Account-ID` thì prefix đổi sang `<acc-id>`.
 - Prefix phải khớp ID của acc hoặc website đã đăng ký; model ID chứa slash không khớp prefix (như `openai/gpt-5.6`) thì giữ nguyên, không bị sửa.
 - Header do caller gửi luôn thắng; prefix chỉ áp dụng khi chưa có header.
 - Áp dụng cả `chat/completions`, `responses` và các body passthrough có trường `model`.
