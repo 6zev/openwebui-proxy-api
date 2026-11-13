@@ -173,6 +173,25 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"YOUR_MODEL_ID","messages":[{"role":"user","content":"Giới thiệu ngắn về bạn"}],"stream":true}'
 ```
 
+### Healthcheck theo tài khoản
+
+Proxy tự probe từng acc định kỳ để loại acc chết/đăng nhập hỏng khỏi round-robin trước khi có request thật.
+
+- `HEALTH_CHECK_SECONDS` (mặc định 300) đặt chu kỳ; `HEALTH_CHECK_DISABLED=1` tắt.
+- Probe dùng đúng auth của acc (Open WebUI login hoặc LibreChat key tĩnh) vào một endpoint chỉ đọc (`/models`); ghi `status: ok|failed`, `latency_ms`, `checked_at`.
+- Acc `failed` bị bỏ khỏi vòng chọn và báo rõ khi ghim: `503 Selected account failed its health check: …`; sẽ tự hồi khi probe lại đạt.
+- `GET /v1/health` (hoặc `?probe=1` để chạy ngay), `POST /v1/health/probe` → báo cả report; cùng cơ chế xác thực Bearer.
+- Admin `GET/POST /api/admin/health`; trường `health` trong `/api/admin/state` để WebUI hiển thị badge “Health: lỗi”.
+- Lỗi probe được làm sạch (không lộ host/token/mật khẩu).
+
+### Routing theo prefix `<id>/<model>`
+
+Bật `MODEL_PREFIX=1` thì danh sách model trả ID dạng `"<website-id>/<model>"` (hoặc `"<acc-id>/<model>"` nếu ghim acc), để một OpenAI client gọi `model: "ai/openai/gpt-5.6-luna"` là tự chọn đúng website/acc **mà không cần header** `X-Website-ID`/`X-Account-ID`.
+
+- Prefix phải khớp ID của acc hoặc website đã đăng ký; model ID chứa slash không khớp prefix (như `openai/gpt-5.6`) thì giữ nguyên, không bị sửa.
+- Header do caller gửi luôn thắng; prefix chỉ áp dụng khi chưa có header.
+- Áp dụng cả `chat/completions`, `responses` và các body passthrough có trường `model`.
+
 ### Chuẩn API hỗ trợ (v0.3.0)
 
 Proxy expose toàn bộ surface chính thức của Open WebUI qua cùng một khoá và cùng cơ chế chọn website/acc:

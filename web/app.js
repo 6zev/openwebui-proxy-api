@@ -114,7 +114,9 @@
 
   function status(account) {
     if (!account.enabled) return badge('Đã tắt');
+    if (account.health === 'failed') return badge('Health: lỗi', 'danger');
     if (Number(account.cooldown_seconds) > 0) return badge(`Chờ ${Math.ceil(account.cooldown_seconds)} giây`, 'warn');
+    if (account.health === 'ok') return badge('Sẵn sàng', 'good');
     return account.available ? badge('Sẵn sàng', 'good') : badge('Chưa sẵn sàng', 'warn');
   }
 
@@ -200,7 +202,7 @@
       const test = action(testing.has(account.id) ? 'Đang thử…' : 'Kiểm tra', 'test-account', account.id);
       test.disabled = testing.has(account.id);
       controls.append(test, action('Sửa', 'edit-account', account.id), action('Xóa', 'delete-account', account.id, true));
-      row.append(cell(node('strong', '', account.name || account.id), node('small', '', account.email || '—'), node('small', '', account.id)), cell(node('span', '', websiteName(account.website_id))), cell(status(account)), cell(node('span', '', account.has_password ? 'Mật khẩu: đã lưu' : 'Mật khẩu: chưa có'), node('small', '', account.proxy_configured ? 'Proxy: đã cấu hình' : 'Proxy: mặc định / kế thừa')), cell(controls));
+      row.append(cell(node('strong', '', account.name || account.id), node('small', '', account.email || '—'), node('small', '', account.id)), cell(node('span', '', websiteName(account.website_id))), cell(status(account)), cell(node('span', '', account.backend === 'librechat' ? (account.has_api_key ? 'Agent key: đã lưu' : 'Agent key: chưa có') : (account.has_password ? 'Mật khẩu: đã lưu' : 'Mật khẩu: chưa có')), node('small', '', account.proxy_configured ? 'Proxy: đã cấu hình' : 'Proxy: mặc định / kế thừa')), cell(controls));
       return row;
     }));
     $('account-empty').hidden = accounts.length !== 0;

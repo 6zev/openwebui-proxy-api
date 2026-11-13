@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
@@ -55,6 +56,33 @@ func (a *Application) snapshot() (*Proxy, Config, uint64) {
 	defer a.mu.RUnlock()
 	return a.proxy, a.cfg, a.revision
 }
+
+// healthLoop starts probing the current proxy snapshot and keeps probing after
+// every config reload by re-resolving the live proxy each tick.
+func (a *Application) healthLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = defaultProbeInterval
+	}
+	go func() {
+		a.probeOnce(ctx)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				a.probeOnce(ctx)
+			}
+		}
+	}()
+}
+
+func (a *Application) probeOnce(ctx context.Context) {
+	proxy, _, _ := a.snapshot()
+	proxy.runHealthProbes(ctx)
+}
+
 func (a *Application) CloseIdleConnections() { p, _, _ := a.snapshot(); p.CloseIdleConnections() }
 func redactedProxy(raw string) string {
 	if raw == "" || raw == "direct" {
@@ -67,6 +95,16 @@ func redactedProxy(raw string) string {
 	u.User = nil
 	return u.String()
 }
+
+// healthHandler exposes the latest probe results to the admin WebUI/API.
+func (a *Application) healthHandler(w http.ResponseWriter, r *http.Request) {
+	proxy, _, _ := a.snapshot()
+	if r.Method == http.MethodPost || r.URL.Query().Get("probe") == "1" {
+		proxy.runHealthProbes(r.Context())
+	}
+	writeJSON(w, 200, map[string]any{"object": "list", "data": proxy.healthReport()})
+}
+
 func (a *Application) state(w http.ResponseWriter) {
 	p, cfg, revision := a.snapshot()
 	sites := make([]map[string]any, 0, len(cfg.Websites))
@@ -77,14 +115,17 @@ func (a *Application) state(w http.ResponseWriter) {
 	for _, c := range cfg.Accounts {
 		available := false
 		cooldown := 0
+		health := "unknown"
 		for _, active := range p.accounts {
 			if active.config.ID == c.ID {
 				cooldown = accountCooldown(active)
-				available = !active.config.Disabled && cooldown == 0
+				status, _, _, _ := active.health.snapshot()
+				health = string(status)
+				available = !active.config.Disabled && cooldown == 0 && status != healthFailed
 				break
 			}
 		}
-		accounts = append(accounts, map[string]any{"id": c.ID, "name": displayName(c.ID, c.Name), "website_id": c.WebsiteID, "email": c.Email, "backend": string(c.Backend), "has_api_key": c.APIKey != "", "enabled": !c.Disabled, "has_password": c.Password != "", "proxy_url": redactedProxy(c.ProxyURL), "proxy_configured": c.ProxyURL != "", "available": available, "cooldown_seconds": cooldown})
+		accounts = append(accounts, map[string]any{"id": c.ID, "name": displayName(c.ID, c.Name), "website_id": c.WebsiteID, "email": c.Email, "backend": string(c.Backend), "has_api_key": c.APIKey != "", "enabled": !c.Disabled, "has_password": c.Password != "", "proxy_url": redactedProxy(c.ProxyURL), "proxy_configured": c.ProxyURL != "", "available": available, "cooldown_seconds": cooldown, "health": health})
 	}
 	writeJSON(w, 200, map[string]any{"version": Version, "revision": revision, "persistent": cfg.ConfigPath != "", "websites": sites, "accounts": accounts, "api_base_path": "/v1"})
 }
@@ -511,6 +552,8 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/admin/")
 	switch {
+	case path == "health" && (r.Method == http.MethodGet || r.Method == http.MethodPost):
+		a.healthHandler(w, r)
 	case path == "state" && r.Method == http.MethodGet:
 		a.state(w)
 	case path == "models" && r.Method == http.MethodGet:

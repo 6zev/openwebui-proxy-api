@@ -42,9 +42,11 @@ type AccountConfig struct {
 type Config struct {
 	BaseURL, APIKey, DefaultModel, OutboundProxy string
 	ConfigPath                                   string
-	Websites                                     []WebsiteConfig
-	Accounts                                     []AccountConfig
-	Timeout, Cooldown                            time.Duration
+	// ModelPrefix enables "<id>/<model>" IDs in model listings.
+	ModelPrefix       bool
+	Websites          []WebsiteConfig
+	Accounts          []AccountConfig
+	Timeout, Cooldown time.Duration
 }
 type account struct {
 	config        AccountConfig
@@ -55,6 +57,7 @@ type account struct {
 	loginBlocked  time.Time
 	cooldownMu    sync.Mutex
 	cooldownUntil time.Time
+	health        accountHealth
 }
 type Proxy struct {
 	config        Config
@@ -268,6 +271,9 @@ func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
 				if n := accountCooldown(a); n > 0 {
 					return nil, &apiError{429, "Selected account is cooling down", n}
 				}
+				if status, _, reason, _ := a.health.snapshot(); status == healthFailed {
+					return nil, &apiError{503, "Selected account failed its health check: " + reason, 0}
+				}
 				return []*account{a}, nil
 			}
 		}
@@ -275,9 +281,14 @@ func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
 	}
 	eligible := make([]*account, 0, len(p.accounts))
 	for _, a := range p.accounts {
-		if !a.config.Disabled && (website == "" || a.config.WebsiteID == website) {
-			eligible = append(eligible, a)
+		if a.config.Disabled || (website != "" && a.config.WebsiteID != website) {
+			continue
 		}
+		// Skip accounts known to be broken; the health loop revives them.
+		if status, _, _, _ := a.health.snapshot(); status == healthFailed {
+			continue
+		}
+		eligible = append(eligible, a)
 	}
 	if len(eligible) == 0 {
 		return nil, &apiError{503, "No enabled accounts configured for this route", 0}
@@ -457,6 +468,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &apiError{401, "Invalid proxy API key", 0})
 		return
 	}
+	if r.Method == http.MethodGet && (r.URL.Path == "/v1/health" || r.URL.Path == "/v1/healthz") {
+		if r.URL.Query().Get("probe") == "1" {
+			p.runHealthProbes(r.Context())
+		}
+		writeJSON(w, 200, map[string]any{"object": "list", "data": p.healthReport()})
+		return
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/health/probe" {
+		failures := p.runHealthProbes(r.Context())
+		writeJSON(w, 200, map[string]any{"object": "list", "failures": failures, "data": p.healthReport()})
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/accounts" {
 		items := make([]map[string]any, 0, len(p.accounts))
 		for _, a := range p.accounts {
@@ -511,6 +534,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if passThrough {
+		body = applyModelPrefix(p, r, body)
 		p.forwardBody(w, r, body, surfaceTarget)
 		return
 	}
@@ -536,6 +560,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, &apiError{400, "model and messages[] are required", 0})
 			return
 		}
+		// "<prefix>/<model>" lets an OpenAI client pick the account or website
+		// without custom headers: prefix may be an account ID or a website ID.
+		if prefix, rest, ok := splitModelPrefix(model); ok {
+			if exists := p.prefixTarget(prefix); exists {
+				model = rest
+				input["model"], _ = json.Marshal(model)
+				if r.Header.Get("X-Account-ID") == "" && r.Header.Get("X-Website-ID") == "" {
+					if p.isAccountID(prefix) {
+						r.Header.Set("X-Account-ID", prefix)
+					} else {
+						r.Header.Set("X-Website-ID", prefix)
+					}
+				}
+			}
+		}
 		body, _ = json.Marshal(input)
 	}
 	candidates, err := p.candidatesFor(r.Header.Get("X-Account-ID"), r.Header.Get("X-Website-ID"))
@@ -556,10 +595,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var response *http.Response
+	selectedPrefix := ""
 	for _, a := range candidates {
 		if ctx.Err() != nil {
 			err = ctx.Err()
 			break
+		}
+		// Only prefix model IDs when the deployment opts in (MODEL_PREFIX=1) and
+		// the caller is not already pinning an account, so default output stays
+		// plain OpenAI-compatible.
+		if p.config.ModelPrefix {
+			selectedPrefix = a.config.ID
+			if r.Header.Get("X-Account-ID") == "" && a.config.WebsiteID != "" {
+				selectedPrefix = a.config.WebsiteID
+			}
 		}
 		accountPath := path
 		extra := http.Header{}
@@ -620,6 +669,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out := make([]map[string]any, 0, len(items))
+		prefix := selectedPrefix
 		for _, m := range items {
 			if m.ID == "" {
 				continue
@@ -627,7 +677,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if m.OwnedBy == "" {
 				m.OwnedBy = "open-webui"
 			}
-			out = append(out, map[string]any{"id": m.ID, "object": "model", "created": m.Created, "owned_by": m.OwnedBy})
+			id := m.ID
+			if prefix != "" {
+				// Expose "<id>/<model>" so a plain OpenAI client can route back to
+				// the same account/website without custom headers.
+				id = prefix + "/" + m.ID
+			}
+			out = append(out, map[string]any{"id": id, "object": "model", "created": m.Created, "owned_by": m.OwnedBy})
 		}
 		writeJSON(w, 200, map[string]any{"object": "list", "data": out})
 		return

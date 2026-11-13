@@ -65,6 +65,15 @@ func loadDotEnv(path string) error {
 	return scanner.Err()
 }
 
+// truthy accepts the usual on/true/1 spellings for boolean env flags.
+func truthy(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 func envDuration(key string, def int64, unit time.Duration) (time.Duration, error) {
 	raw := os.Getenv(key)
 	if raw == "" {
@@ -78,6 +87,7 @@ func envDuration(key string, def int64, unit time.Duration) (time.Duration, erro
 }
 func configFromEnv() (Config, error) {
 	c := Config{BaseURL: os.Getenv("OPENWEBUI_URL"), APIKey: os.Getenv("PROXY_API_KEY"), DefaultModel: os.Getenv("DEFAULT_MODEL"), OutboundProxy: os.Getenv("OUTBOUND_PROXY")}
+	c.ModelPrefix = truthy(os.Getenv("MODEL_PREFIX"))
 	var err error
 	c.Timeout, err = envDuration("UPSTREAM_TIMEOUT_MS", 300000, time.Millisecond)
 	if err != nil {
@@ -212,6 +222,18 @@ Server configuration is read from environment and .env. See README.md.`)
 	server := &http.Server{Handler: app, ReadHeaderTimeout: 15 * time.Second, ReadTimeout: 60 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 64 << 10}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Background health probes keep dead accounts out of rotation.
+	healthCtx, stopHealth := context.WithCancel(ctx)
+	defer stopHealth()
+	interval := defaultProbeInterval
+	if raw := os.Getenv("HEALTH_CHECK_SECONDS"); raw != "" {
+		if seconds, convErr := strconv.Atoi(raw); convErr == nil && seconds > 0 {
+			interval = time.Duration(seconds) * time.Second
+		}
+	}
+	if !truthy(os.Getenv("HEALTH_CHECK_DISABLED")) {
+		app.healthLoop(healthCtx, interval)
+	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	log.Printf("Open WebUI proxy %s listening on %s (%d accounts)", Version, listener.Addr(), len(cfg.Accounts))
