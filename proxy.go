@@ -33,6 +33,11 @@ type AccountConfig struct {
 	BaseURL   string `json:"base_url,omitempty"`
 	ProxyURL  string `json:"proxy_url,omitempty"`
 	Disabled  bool   `json:"disabled,omitempty"`
+	// Backend selects the upstream API family: "" or "openwebui" uses email +
+	// password login, "librechat" uses the static LibreChat Agents API key.
+	Backend BackendKind `json:"backend,omitempty"`
+	// APIKey is the LibreChat Agents API key (Authorization: Bearer …).
+	APIKey string `json:"api_key,omitempty"`
 }
 type Config struct {
 	BaseURL, APIKey, DefaultModel, OutboundProxy string
@@ -140,8 +145,11 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 			return nil, fmt.Errorf("duplicate account ID: %s", a.ID)
 		}
 		ids[a.ID] = true
-		if a.Email == "" || a.Password == "" || len(a.Email) > 320 || len(a.Password) > 8192 || len(a.Name) > 160 {
-			return nil, fmt.Errorf("account %s requires email and password (display name is optional)", a.ID)
+		if err := validateBackendAccount(a); err != nil {
+			return nil, err
+		}
+		if a.Backend == "" {
+			a.Backend = BackendOpenWebUI
 		}
 		a.Name = displayName(a.ID, a.Name)
 		proxyURL := a.ProxyURL
@@ -360,18 +368,33 @@ func (p *Proxy) retryDuration(s string) time.Duration {
 	return d
 }
 func (p *Proxy) request(ctx context.Context, a *account, path, method string, body []byte) (*http.Response, error, bool) {
-	token, err := p.login(ctx, a)
+	return p.requestWithHeaders(ctx, a, path, method, body, nil)
+}
+
+// requestWithHeaders forwards to the account's backend. extra lets callers add
+// protocol headers (for example Idempotency-Key for LibreChat agent events)
+// without teaching this function about every surface. Static-key backends
+// (LibreChat Agents API) never perform a login round-trip and never auto-retry
+// a 401, because re-sending an idempotency-keyed event is the caller's call.
+func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method string, body []byte, extra http.Header) (*http.Response, error, bool) {
+	auth, err := backendAuthHeader(ctx, p, a)
 	if err != nil {
 		var e *apiError
 		// A service-wide login rate limit is not a reason to rotate accounts.
 		retry := ctx.Err() == nil && !(errors.As(err, &e) && e.status == 429)
 		return nil, err, retry
 	}
+	staticKey := a.config.Backend == BackendLibreChat
 	for attempt := 0; attempt < 2; attempt++ {
 		req, _ := http.NewRequestWithContext(ctx, method, a.config.BaseURL+path, bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Authorization", auth)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "*/*")
+		for name, values := range extra {
+			for _, value := range values {
+				req.Header.Add(name, value)
+			}
+		}
 		resp, err := a.client.Do(req)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -379,24 +402,28 @@ func (p *Proxy) request(ctx context.Context, a *account, path, method string, bo
 			}
 			return nil, err, false
 		}
-		if resp.StatusCode == 401 && attempt == 0 {
+		if resp.StatusCode == 401 && attempt == 0 && !staticKey {
 			resp.Body.Close()
 			a.mu.Lock()
-			if a.token == token {
+			// Invalidate the cached token so login() actually re-authenticates;
+			// auth carries the "Bearer " prefix while a.token holds the raw token.
+			if a.token != "" && "Bearer "+a.token == auth {
 				a.token = ""
 			}
 			a.mu.Unlock()
-			token, err = p.login(ctx, a)
+			var refreshed string
+			refreshed, err = p.login(ctx, a)
 			if err != nil {
 				return nil, err, false
 			}
+			auth = "Bearer " + refreshed
 			continue
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return resp, nil, false
 		}
 		resp.Body.Close()
-		e := &apiError{status: resp.StatusCode, message: fmt.Sprintf("Open WebUI returned HTTP %d", resp.StatusCode)}
+		e := &apiError{status: resp.StatusCode, message: fmt.Sprintf("%s returned HTTP %d", backendLabel(a.config.Backend), resp.StatusCode)}
 		if resp.StatusCode == 429 {
 			d := p.retryDuration(resp.Header.Get("Retry-After"))
 			p.cooldown(a, d)
@@ -408,7 +435,7 @@ func (p *Proxy) request(ctx context.Context, a *account, path, method string, bo
 		}
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			e.status = 502
-			e.message = "Open WebUI returned an unexpected redirect"
+			e.message = "Upstream returned an unexpected redirect"
 		}
 		return nil, e, false
 	}
@@ -444,11 +471,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Every other documented Open WebUI surface (Anthropic Messages, Ollama
 	// native, embeddings, tools, MCP, knowledge, files, admin) is forwarded to
 	// the selected account so upstream keeps ownership of execution.
+	if err := eventsHeaderGuard(p, r); err != nil {
+		writeError(w, err)
+		return
+	}
 	passThrough := false
 	var surfaceTarget string
 	if !models && !chat {
-		target, ok := mapSurfacePath(r.URL.Path)
-		if ok {
+		// Open WebUI surface wins for its own paths; LibreChat agents paths are
+		// only considered when the Open WebUI surface does not claim them.
+		if target, ok := mapSurfacePath(r.URL.Path); ok {
+			passThrough = true
+			surfaceTarget = target
+		} else if target, ok := libreChatUpstreamPath(r.URL.Path); ok {
+			// Agent-events and other LibreChat-only routes have no Open WebUI
+			// equivalent, so they fall back to the LibreChat surface.
 			passThrough = true
 			surfaceTarget = target
 		}
@@ -508,9 +545,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), p.config.Timeout)
 	defer cancel()
+	// Open WebUI paths; LibreChat accounts translate these per account because
+	// the two backends expose different route families for the same surface.
 	path, method := "/api/chat/completions", http.MethodPost
 	if models {
 		path, method = "/api/models", http.MethodGet
+	}
+	if err := eventsRouteGuard(candidates, r); err != nil {
+		writeError(w, err)
+		return
 	}
 	var response *http.Response
 	for _, a := range candidates {
@@ -518,10 +561,27 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			err = ctx.Err()
 			break
 		}
+		accountPath := path
+		extra := http.Header{}
+		if a.config.Backend == BackendLibreChat {
+			public := "/v1/chat/completions"
+			if models {
+				public = "/v1/models"
+			}
+			if chat {
+				public = "/v1/chat/completions"
+			}
+			if mapped, ok := libreChatUpstreamPath(public); ok {
+				accountPath = mapped
+			} else {
+				err = &apiError{404, "Endpoint not found", 0}
+				break
+			}
+		}
 		w.Header().Set("X-Account-ID", a.config.ID)
 		w.Header().Set("X-Website-ID", a.config.WebsiteID)
 		var retry bool
-		response, err, retry = p.request(ctx, a, path, method, body)
+		response, err, retry = p.requestWithHeaders(ctx, a, accountPath, method, body, extra)
 		if err == nil {
 			break
 		}
@@ -627,7 +687,16 @@ func (p *Proxy) forwardBody(w http.ResponseWriter, r *http.Request, body []byte,
 		w.Header().Set("X-Account-ID", a.config.ID)
 		w.Header().Set("X-Website-ID", a.config.WebsiteID)
 		var retry bool
-		response, err, retry = p.request(ctx, a, upstreamPath, r.Method, body)
+		accountPath := upstreamPath
+		if a.config.Backend == BackendLibreChat {
+			mapped, ok := libreChatUpstreamPath(r.URL.Path)
+			if !ok {
+				err = &apiError{404, "Endpoint not found", 0}
+				break
+			}
+			accountPath = mapped
+		}
+		response, err, retry = p.requestWithHeaders(ctx, a, accountPath, r.Method, body, forwardHeaders(a, r))
 		if err == nil {
 			break
 		}

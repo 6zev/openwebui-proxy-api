@@ -84,7 +84,7 @@ func (a *Application) state(w http.ResponseWriter) {
 				break
 			}
 		}
-		accounts = append(accounts, map[string]any{"id": c.ID, "name": displayName(c.ID, c.Name), "website_id": c.WebsiteID, "email": c.Email, "enabled": !c.Disabled, "has_password": c.Password != "", "proxy_url": redactedProxy(c.ProxyURL), "proxy_configured": c.ProxyURL != "", "available": available, "cooldown_seconds": cooldown})
+		accounts = append(accounts, map[string]any{"id": c.ID, "name": displayName(c.ID, c.Name), "website_id": c.WebsiteID, "email": c.Email, "backend": string(c.Backend), "has_api_key": c.APIKey != "", "enabled": !c.Disabled, "has_password": c.Password != "", "proxy_url": redactedProxy(c.ProxyURL), "proxy_configured": c.ProxyURL != "", "available": available, "cooldown_seconds": cooldown})
 	}
 	writeJSON(w, 200, map[string]any{"version": Version, "revision": revision, "persistent": cfg.ConfigPath != "", "websites": sites, "accounts": accounts, "api_base_path": "/v1"})
 }
@@ -217,6 +217,10 @@ type accountDraft struct {
 	Password  *string `json:"password"`
 	ProxyURL  *string `json:"proxy_url"`
 	Enabled   *bool   `json:"enabled"`
+	// Backend picks the upstream API family ("openwebui" or "librechat").
+	Backend *string `json:"backend"`
+	// APIKey is the LibreChat Agents API key; never echoed back in state.
+	APIKey *string `json:"api_key"`
 }
 
 func (a *Application) websiteMutation(w http.ResponseWriter, r *http.Request, id string) {
@@ -355,6 +359,12 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 		}
 		if draft.ProxyURL != nil {
 			account.ProxyURL = strings.TrimSpace(*draft.ProxyURL)
+		}
+		if draft.Backend != nil {
+			account.Backend = BackendKind(strings.TrimSpace(*draft.Backend))
+		}
+		if draft.APIKey != nil && strings.TrimSpace(*draft.APIKey) != "" {
+			account.APIKey = strings.TrimSpace(*draft.APIKey)
 		}
 		if draft.Enabled != nil {
 			account.Disabled = !*draft.Enabled

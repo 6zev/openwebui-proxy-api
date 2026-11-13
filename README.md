@@ -190,6 +190,22 @@ Proxy expose toàn bộ surface chính thức của Open WebUI qua cùng một k
 - Path không thuộc allow-list trả `404 Endpoint not found` — proxy không blind-forward.
 - Tool call và request có tác dụng phụ không failover sang acc khác sau khi đã gửi.
 
+### Backend LibreChat (Agents API)
+
+Mỗi acc có thể trỏ tới **Open WebUI** (mặc định, email + mật khẩu) hoặc **LibreChat Agents API** (API key tĩnh). Khai báo trên WebUI qua ô "Loại backend", hoặc trong `CONFIG_FILE`:
+
+```json
+{"id":"agent1","website_id":"lc","backend":"librechat","api_key":"lc_agent_key_xxx"}
+```
+
+- LibreChat **không cần email/mật khẩu**; acc `librechat` bị từ chối nếu có `password`.
+- ánh xạ: `/v1/chat/completions` → `/api/agents/v1/chat/completions`, `/v1/models` → `/api/agents/v1/models` (ID là `agent_…`), `/v1/responses` → `/api/agents/v1/responses`, `/v1/events*` → `/api/agents/v1/events*`, `/v1/agents*` và `/v1/skills*` → management API.
+- `POST /v1/events` **bắt buộc** header `Idempotency-Key` (1–256 ký tự `A-Za-z0-9._~:/+=-`), được chuyển tiếp nguyên vẹn; thiếu/sai → `400` trước khi gọi upstream.
+- Không có bước login/refresh: key tĩnh gửi thẳng mỗi request, `401` **không** tự đăng nhập lại (an toàn cho events).
+- Management routes cần machine OIDC token của LibreChat — proxy chỉ chuyển tiếp `Authorization` của acc, nên cần dùng API key hoặc mở `remoteApi` phía LibreChat.
+- LibreChat Agents API đang **beta**, đường dẫn/payload có thể đổi giữa các bản.
+- Không xác minh runtime với instance LibreChat thật nào trong phiên này.
+
 ### Tool calling, Web Search, MCP và embeddings
 
 Proxy chuyển tiếp nguyên vẹn tham số OpenAI nên các tính năng của Open WebUI hoạt động bình thường:

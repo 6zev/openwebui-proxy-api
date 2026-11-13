@@ -484,7 +484,9 @@ func TestProxyTimeout(t *testing.T) {
 	// The proxy must never re-send generation after a timeout. The upstream may
 	// record the call slightly after the client timeout fires, so poll briefly
 	// instead of asserting an exact instantaneous count.
-	deadline := time.Now().Add(2 * time.Second)
+	// A racing scheduler can delay the upstream recording past a short window,
+	// so wait longer and only then assert the exact count.
+	deadline := time.Now().Add(10 * time.Second)
 	var records []proxyTestRecord
 	for time.Now().Before(deadline) {
 		_, records = u.snapshot()
@@ -493,6 +495,8 @@ func TestProxyTimeout(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	time.Sleep(100 * time.Millisecond) // catch an illegal retry that lands late
+	_, records = u.snapshot()
 	if len(records) != 1 || records[0].ID != "alpha" {
 		t.Errorf("timeout retried generation: %v", records)
 	}

@@ -323,16 +323,20 @@
     $('account-fields').hidden = kind !== 'account';
     $('entity-url').required = kind === 'website';
     $('entity-url').disabled = kind !== 'website';
-    for (const id of ['entity-website', 'entity-email', 'entity-password']) $(id).disabled = kind !== 'account';
+    for (const id of ['entity-website', 'entity-email', 'entity-password', 'entity-backend', 'entity-api-key']) $(id).disabled = kind !== 'account';
     $('entity-website').required = kind === 'account';
-    $('entity-email').required = kind === 'account';
-    $('entity-password').required = kind === 'account' && !entity;
+    $('entity-email').required = kind === 'account' && backendKind() !== 'librechat';
+    $('entity-password').required = kind === 'account' && !entity && backendKind() !== 'librechat';
     $('password-help').textContent = entity ? 'Để trống để giữ mật khẩu hiện tại.' : 'Nhập mật khẩu đăng nhập tài khoản Open WebUI.';
     $('entity-id').value = entity?.id || '';
     $('entity-id').readOnly = Boolean(entity);
     $('entity-name').value = entity?.name || '';
     $('entity-url').value = entity?.base_url || '';
     $('entity-email').value = entity?.email || '';
+    $('entity-backend').value = entity?.backend || 'openwebui';
+    $('entity-backend').onchange = syncBackendFields;
+    syncBackendFields();
+    $('entity-api-key').value = '';
     $('entity-password').value = '';
     $('entity-proxy').value = '';
     $('entity-proxy').disabled = false;
@@ -342,6 +346,21 @@
     populate($('entity-website'), state.websites, { value: '', text: 'Chọn một website đã đăng ký' }, entity?.website_id || '');
     $('editor-dialog').showModal();
     (entity ? $('entity-name') : $('entity-id')).focus();
+  }
+
+  function syncBackendFields() {
+    const libre = backendKind() === 'librechat';
+    $('entity-email').required = !libre;
+    $('entity-password').required = !libre && !editor?.id;
+  }
+
+  function backendKind() {
+    return ($('entity-backend')?.value || 'openwebui').trim();
+  }
+
+  function entityHasKey(id) {
+    const account = state.accounts.find((item) => item.id === id);
+    return Boolean(account && account.has_api_key);
   }
 
   async function saveEntity(event) {
@@ -360,8 +379,15 @@
     } else {
       body.website_id = $('entity-website').value;
       if (!state.websites.some((site) => site.id === body.website_id)) { showError('editor-error', 'Chọn một website đã đăng ký.'); return; }
-      body.email = $('entity-email').value.trim();
-      if ($('entity-password').value) body.password = $('entity-password').value;
+      body.backend = backendKind();
+      if (body.backend === 'librechat') {
+        const apiKey = $('entity-api-key').value.trim();
+        if (apiKey) body.api_key = apiKey;
+        if (!apiKey && !(context.id && entityHasKey(context.id))) { showError('editor-error', 'Nhập Agent API key cho tài khoản LibreChat.'); return; }
+      } else {
+        body.email = $('entity-email').value.trim();
+        if ($('entity-password').value) body.password = $('entity-password').value;
+      }
     }
     if (context.id && $('clear-proxy').checked) body.proxy_url = '';
     else if ($('entity-proxy').value.trim()) body.proxy_url = $('entity-proxy').value.trim();
@@ -379,6 +405,7 @@
     } finally {
       if (current === session) $('save-entity-button').disabled = false;
       delete body.password;
+      delete body.api_key;
       delete body.proxy_url;
     }
   }
