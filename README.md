@@ -210,6 +210,15 @@ Proxy expose toàn bộ surface chính thức của Open WebUI qua cùng một k
 - Path không thuộc allow-list trả `404 Endpoint not found` — proxy không blind-forward.
 - Tool call và request có tác dụng phụ không failover sang acc khác sau khi đã gửi.
 
+### ID tài khoản chỉ cần duy nhất trong từng website
+
+Hai website có thể có tài khoản **cùng ID** (ví dụ `web-a/acc` và `web-b/acc`). Định danh toàn hệ thống là cặp `<website-id>/<account-id>`:
+
+- `X-Account-ID` gửi kèm `X-Website-ID` là đủ; gửi **ID trần** khi nó tồn tại ở nhiều website sẽ trả `409` (mơ hồ) thay vì đoán bừa.
+- Admin API nhận cả `/api/admin/accounts/<id>` và `/api/admin/accounts/<website>/<id>`; đường dẫn đầy đủ bắt buộc khi ID bị trùng.
+- `MODEL_PREFIX=1` hiển thị `<website-id>/<model>` nên không cần header vẫn route đúng.
+- `/v1/accounts` và `/api/admin/state` trả thêm trường `key` (`<website>/<id>`) để phân biệt.
+
 ### Backend LibreChat (Agents API)
 
 Mỗi acc có thể trỏ tới **Open WebUI** (mặc định, email + mật khẩu) hoặc **LibreChat Agents API** (API key tĩnh). Khai báo trên WebUI qua ô "Loại backend", hoặc trong `CONFIG_FILE`:

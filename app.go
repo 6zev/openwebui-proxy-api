@@ -117,7 +117,7 @@ func (a *Application) state(w http.ResponseWriter) {
 		cooldown := 0
 		health := "unknown"
 		for _, active := range p.accounts {
-			if active.config.ID == c.ID {
+			if active.config.ID == c.ID && active.config.WebsiteID == c.WebsiteID {
 				cooldown = accountCooldown(active)
 				status, _, _, _ := active.health.snapshot()
 				health = string(status)
@@ -125,7 +125,7 @@ func (a *Application) state(w http.ResponseWriter) {
 				break
 			}
 		}
-		accounts = append(accounts, map[string]any{"id": c.ID, "name": displayName(c.ID, c.Name), "stored_name": c.Name, "website_id": c.WebsiteID, "email": c.Email, "backend": string(c.Backend), "has_api_key": c.APIKey != "", "enabled": !c.Disabled, "has_password": c.Password != "", "proxy_url": redactedProxy(c.ProxyURL), "proxy_configured": c.ProxyURL != "", "available": available, "cooldown_seconds": cooldown, "health": health})
+		accounts = append(accounts, map[string]any{"id": c.ID, "key": accountKey(c.WebsiteID, c.ID), "name": displayName(c.ID, c.Name), "stored_name": c.Name, "website_id": c.WebsiteID, "email": c.Email, "backend": string(c.Backend), "has_api_key": c.APIKey != "", "enabled": !c.Disabled, "has_password": c.Password != "", "proxy_url": redactedProxy(c.ProxyURL), "proxy_configured": c.ProxyURL != "", "available": available, "cooldown_seconds": cooldown, "health": health})
 	}
 	writeJSON(w, 200, map[string]any{"version": Version, "revision": revision, "persistent": cfg.ConfigPath != "", "websites": sites, "accounts": accounts, "api_base_path": "/v1"})
 }
@@ -360,20 +360,47 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 	}
 	if r.Method == http.MethodPost {
 		id = draft.ID
-	} else if draft.ID != "" && draft.ID != id {
-		writeError(w, &apiError{400, "Account ID is immutable", 0})
-		return
+	} else if draft.ID != "" {
+		// `id` may carry the "<website>/<account-id>" key; only the bare account
+		// part is immutable.
+		_, bareID := splitAccountKey(id)
+		if draft.ID != bareID {
+			writeError(w, &apiError{400, "Account ID is immutable", 0})
+			return
+		}
 	}
 	err := a.mutate(func(doc *configDocument) error {
+		// Account IDs only need to be unique within one website, so the lookup
+		// key is the composite "<website-id>/<account-id>".
+		websiteID, accountID := splitAccountKey(id)
 		index := -1
+		matches := 0
 		for i, c := range doc.Accounts {
-			if c.ID == id {
-				index = i
-				break
+			if c.ID == accountID && (websiteID == "" || c.WebsiteID == websiteID) {
+				if index < 0 {
+					index = i
+				}
+				matches++
 			}
 		}
-		if r.Method == http.MethodPost && index >= 0 {
-			return &apiError{409, "Account ID already exists", 0}
+		// A bare ID that exists in several websites would silently edit or
+		// delete the wrong account, so it is refused instead of guessed.
+		if websiteID == "" && matches > 1 {
+			return &apiError{409, "Account ID exists in more than one website; use <website-id>/<account-id>", 0}
+		}
+		if r.Method == http.MethodPost {
+			// POST creates: the same ID may exist in another website, but not in
+			// the target one.
+			targetSite := ""
+			if draft.WebsiteID != nil {
+				targetSite = strings.TrimSpace(*draft.WebsiteID)
+			}
+			for _, c := range doc.Accounts {
+				if c.ID == accountID && c.WebsiteID == targetSite {
+					return &apiError{409, "Account ID already exists in this website", 0}
+				}
+			}
+			index = -1
 		}
 		if r.Method != http.MethodPost && index < 0 {
 			return &apiError{404, "Account not found", 0}
@@ -382,7 +409,7 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 			doc.Accounts = append(doc.Accounts[:index], doc.Accounts[index+1:]...)
 			return nil
 		}
-		account := AccountConfig{ID: id}
+		account := AccountConfig{ID: accountID}
 		if index >= 0 {
 			account = doc.Accounts[index]
 		}
@@ -444,11 +471,12 @@ func (a *Application) adminProxy(w http.ResponseWriter, r *http.Request, path st
 	clone.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	p.ServeHTTP(w, clone)
 }
-func (a *Application) testAccount(w http.ResponseWriter, r *http.Request, id string) {
+func (a *Application) testAccount(w http.ResponseWriter, r *http.Request, key string) {
 	p, cfg, _ := a.snapshot()
+	websiteID, id := splitAccountKey(key)
 	var selected *account
 	for _, c := range p.accounts {
-		if c.config.ID == id {
+		if c.config.ID == id && (websiteID == "" || c.config.WebsiteID == websiteID) {
 			selected = c
 			break
 		}
@@ -583,13 +611,20 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "accounts":
 		a.accountMutation(w, r, "")
 	case strings.HasPrefix(path, "accounts/"):
-		parts := strings.Split(strings.TrimPrefix(path, "accounts/"), "/")
-		if len(parts) == 2 && parts[1] == "test" && r.Method == http.MethodPost {
-			a.testAccount(w, r, parts[0])
-		} else if len(parts) == 1 {
-			a.accountMutation(w, r, parts[0])
-		} else {
+		// Account paths accept either "<id>" (ambiguous across websites) or the
+		// unambiguous "<website-id>/<account-id>".
+		rest := strings.TrimPrefix(path, "accounts/")
+		parts := strings.Split(rest, "/")
+		wantsTest := r.Method == http.MethodPost && len(parts) > 1 && parts[len(parts)-1] == "test"
+		if wantsTest {
+			parts = parts[:len(parts)-1]
+		}
+		if len(parts) == 0 || len(parts) > 2 {
 			writeError(w, &apiError{404, "Endpoint not found", 0})
+		} else if wantsTest {
+			a.testAccount(w, r, strings.Join(parts, "/"))
+		} else {
+			a.accountMutation(w, r, strings.Join(parts, "/"))
 		}
 	default:
 		writeError(w, &apiError{404, "Endpoint not found", 0})

@@ -138,12 +138,19 @@ func TestMultisiteFailoverStaysWithinSelectedWebsite(t *testing.T) {
 	}
 }
 
-func TestMultisiteAccountIDsAreGloballyUnique(t *testing.T) {
+// Account IDs are unique per website, so the same ID in two websites is valid
+// and only a duplicate inside one website is rejected.
+func TestMultisiteAccountIDsAreUniquePerWebsite(t *testing.T) {
 	east, west := newProxyTestUpstream(t), newProxyTestUpstream(t)
 	cfg := multisiteTestConfig(east, west)
 	cfg.Accounts[2].ID = cfg.Accounts[0].ID
+	if _, err := NewProxy(cfg); err != nil {
+		t.Fatalf("duplicate account ID across websites rejected: %v", err)
+	}
+	cfg = multisiteTestConfig(east, west)
+	cfg.Accounts[1].ID = cfg.Accounts[0].ID
 	if _, err := NewProxy(cfg); err == nil {
-		t.Fatal("duplicate account ID across websites accepted")
+		t.Fatal("duplicate account ID inside one website accepted")
 	}
 	cfg = multisiteTestConfig(east, west)
 	cfg.Accounts[0].WebsiteID = "missing"

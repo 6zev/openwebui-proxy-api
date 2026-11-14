@@ -19,6 +19,12 @@
   const testing = new Set();
   const requests = new Set();
 
+  // Account keys look like "<website-id>/<account-id>"; each segment must be
+  // encoded separately or the slash is swallowed by encodeURIComponent.
+  function keyPath(key) {
+    return String(key).split('/').map(encodeURIComponent).join('/');
+  }
+
   class APIError extends Error {
     constructor(message, status) {
       super(message);
@@ -200,10 +206,11 @@
     $('account-rows').replaceChildren(...accounts.map((account) => {
       const row = node('tr');
       const controls = node('div', 'row-actions');
-      const test = action(testing.has(account.id) ? 'Đang thử…' : 'Kiểm tra', 'test-account', account.id);
-      test.disabled = testing.has(account.id);
-      controls.append(test, action('Sửa', 'edit-account', account.id), action('Xóa', 'delete-account', account.id, true));
-      row.append(cell(node('strong', '', account.name || account.id), node('small', '', account.email || '—'), node('small', '', account.id)), cell(node('span', '', websiteName(account.website_id))), cell(status(account)), cell(node('span', '', account.backend === 'librechat' ? (account.has_api_key ? 'Agent key: đã lưu' : 'Agent key: chưa có') : (account.has_password ? 'Mật khẩu: đã lưu' : 'Mật khẩu: chưa có')), node('small', '', account.backend === 'librechat' ? 'backend: LibreChat Agents' : 'backend: Open WebUI'), node('small', '', account.proxy_configured ? 'Proxy: đã cấu hình' : 'Proxy: mặc định / kế thừa')), cell(controls));
+      const accountKey = account.key || account.id;
+      const test = action(testing.has(accountKey) ? 'Đang thử…' : 'Kiểm tra', 'test-account', accountKey);
+      test.disabled = testing.has(accountKey);
+      controls.append(test, action('Sửa', 'edit-account', accountKey), action('Xóa', 'delete-account', accountKey, true));
+      row.append(cell(node('strong', '', account.name || account.id), node('small', '', account.email || '—'), node('small', '', account.key || account.id)), cell(node('span', '', websiteName(account.website_id))), cell(status(account)), cell(node('span', '', account.backend === 'librechat' ? (account.has_api_key ? 'Agent key: đã lưu' : 'Agent key: chưa có') : (account.has_password ? 'Mật khẩu: đã lưu' : 'Mật khẩu: chưa có')), node('small', '', account.backend === 'librechat' ? 'backend: LibreChat Agents' : 'backend: Open WebUI'), node('small', '', account.proxy_configured ? 'Proxy: đã cấu hình' : 'Proxy: mặc định / kế thừa')), cell(controls));
       return row;
     }));
     $('account-empty').hidden = accounts.length !== 0;
@@ -313,12 +320,21 @@
     editor = null;
   }
 
+  function findAccount(keyOrID) {
+    return state.accounts.find((item) => (item.key || item.id) === keyOrID)
+      || state.accounts.find((item) => item.id === keyOrID);
+  }
+
   function openEditor(kind, id) {
     const list = kind === 'website' ? state.websites : state.accounts;
-    const entity = id ? list.find((item) => item.id === id) : null;
+    const entity = !id ? null : (kind === 'website'
+      ? list.find((item) => item.id === id)
+      : findAccount(id));
     if (id && !entity) return;
     if (kind === 'account' && !state.websites.length) { notice('Thêm website trước khi tạo tài khoản.', true); return; }
-    editor = { kind, id: entity?.id || null };
+    // Accounts are addressed by their composite key so two websites may share
+    // an account ID; websites keep their plain ID.
+    editor = { kind, id: entity ? (kind === 'account' ? (entity.key || entity.id) : entity.id) : null };
     $('editor-form').reset();
     $('editor-error').hidden = true;
     $('editor-title').textContent = `${entity ? 'Chỉnh sửa' : 'Thêm'} ${kind === 'website' ? 'website' : 'tài khoản'}`;
@@ -387,8 +403,8 @@
     return ($('entity-backend')?.value || 'openwebui').trim();
   }
 
-  function entityHasKey(id) {
-    const account = state.accounts.find((item) => item.id === id);
+  function entityHasKey(keyOrID) {
+    const account = findAccount(keyOrID);
     return Boolean(account && account.has_api_key);
   }
 
@@ -399,7 +415,9 @@
     const current = session;
     const body = { name: $('entity-name').value.trim(), enabled: $('entity-enabled').checked };
     if (!context.id) body.id = $('entity-id').value;
-    if (!/^[A-Za-z0-9_.-]{1,64}$/.test(context.id || body.id)) { showError('editor-error', 'ID không hợp lệ.'); return; }
+    // context.id may be a composite "<website>/<id>" key; validate the id part.
+    const bareID = (context.id && context.kind === 'account' ? context.id.split('/').pop() : (context.id || body.id));
+    if (!/^[A-Za-z0-9_.-]{1,64}$/.test(bareID)) { showError('editor-error', 'ID không hợp lệ.'); return; }
     if (context.kind === 'website') {
       body.base_url = $('entity-url').value.trim();
       let url;
@@ -427,7 +445,8 @@
     $('editor-error').hidden = true;
     const collection = context.kind === 'website' ? 'websites' : 'accounts';
     try {
-      await api(`/api/admin/${collection}${context.id ? '/' + encodeURIComponent(context.id) : ''}`, { method: context.id ? 'PUT' : 'POST', body: JSON.stringify(body) });
+      const target = context.id && context.kind === 'account' ? keyPath(context.id) : (context.id ? encodeURIComponent(context.id) : '');
+      await api(`/api/admin/${collection}${target ? '/' + target : ''}`, { method: context.id ? 'PUT' : 'POST', body: JSON.stringify(body) });
       if (current !== session) return;
       closeEditor();
       notice('Đã lưu cấu hình thành công.');
@@ -443,9 +462,11 @@
   }
 
   function openDelete(kind, id) {
-    const entity = (kind === 'website' ? state.websites : state.accounts).find((item) => item.id === id);
+    const entity = kind === 'website'
+      ? state.websites.find((item) => item.id === id)
+      : findAccount(id);
     if (!entity) return;
-    deletion = { kind, id };
+    deletion = { kind, id: (entity.key || entity.id), accountId: entity.id };
     $('delete-error').hidden = true;
     $('confirm-delete-button').disabled = false;
     $('delete-description').textContent = `Xóa ${kind === 'website' ? 'website' : 'tài khoản'} “${entity.name || entity.id}” (${entity.id})? ${kind === 'website' ? 'Hãy xóa các tài khoản thuộc website trước. ' : ''}Thao tác này không thể hoàn tác.`;
@@ -459,7 +480,7 @@
     const current = session;
     $('confirm-delete-button').disabled = true;
     try {
-      await api(`/api/admin/${context.kind === 'website' ? 'websites' : 'accounts'}/${encodeURIComponent(context.id)}`, { method: 'DELETE' });
+      await api(`/api/admin/${context.kind === 'website' ? 'websites' : 'accounts'}/${keyPath(context.id)}`, { method: 'DELETE' });
       if (current !== session) return;
       $('delete-dialog').close();
       deletion = null;
@@ -477,7 +498,7 @@
     renderAccounts();
     $('account-test-result').textContent = `Đang kiểm tra tài khoản ${id}…`;
     try {
-      const result = await api(`/api/admin/accounts/${encodeURIComponent(id)}/test`, { method: 'POST' });
+      const result = await api(`/api/admin/accounts/${keyPath(id)}/test`, { method: 'POST' });
       if (current !== session) return;
       const count = Array.isArray(result.models) ? result.models.length : 0;
       $('account-test-result').textContent = `Kết nối thành công: ${id} · ${count} mô hình.`;

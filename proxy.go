@@ -139,15 +139,18 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 		s.Name = displayName(s.ID, s.Name)
 		p.sites[s.ID] = s
 	}
+	// Account IDs only have to be unique inside their website; the composite
+	// "<website-id>/<account-id>" is the deployment-wide identity.
 	ids := map[string]bool{}
 	for _, a := range c.Accounts {
 		if !validConfigID(a.ID) {
 			return nil, errors.New("account IDs must use 1-64 letters, digits, dots, hyphens or underscores")
 		}
-		if ids[a.ID] {
-			return nil, fmt.Errorf("duplicate account ID: %s", a.ID)
+		key := accountKey(a.WebsiteID, a.ID)
+		if ids[key] {
+			return nil, fmt.Errorf("duplicate account ID %q in website %q", a.ID, a.WebsiteID)
 		}
-		ids[a.ID] = true
+		ids[key] = true
 		if err := validateBackendAccount(a); err != nil {
 			return nil, err
 		}
@@ -260,24 +263,36 @@ func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
 		}
 	}
 	if id != "" {
+		// Account IDs are unique per website, so (website, id) identifies one
+		// account. Without a website the caller may use id alone, but only when
+		// it is unambiguous.
+		matches := make([]*account, 0, 1)
 		for _, a := range p.accounts {
-			if a.config.ID == id {
-				if website != "" && a.config.WebsiteID != website {
-					return nil, &apiError{400, "Selected account does not belong to selected website", 0}
-				}
-				if a.config.Disabled {
-					return nil, &apiError{503, "Selected account or website is disabled", 0}
-				}
-				if n := accountCooldown(a); n > 0 {
-					return nil, &apiError{429, "Selected account is cooling down", n}
-				}
-				if status, _, reason, _ := a.health.snapshot(); status == healthFailed {
-					return nil, &apiError{503, "Selected account failed its health check: " + reason, 0}
-				}
-				return []*account{a}, nil
+			if a.config.ID != id {
+				continue
 			}
+			if website != "" && a.config.WebsiteID != website {
+				continue
+			}
+			matches = append(matches, a)
 		}
-		return nil, &apiError{400, "Unknown X-Account-ID", 0}
+		if len(matches) == 0 {
+			return nil, &apiError{400, "Unknown X-Account-ID", 0}
+		}
+		if len(matches) > 1 {
+			return nil, &apiError{409, "Account ID is ambiguous across websites; send X-Website-ID as well", 0}
+		}
+		a := matches[0]
+		if a.config.Disabled {
+			return nil, &apiError{503, "Selected account or website is disabled", 0}
+		}
+		if n := accountCooldown(a); n > 0 {
+			return nil, &apiError{429, "Selected account is cooling down", n}
+		}
+		if status, _, reason, _ := a.health.snapshot(); status == healthFailed {
+			return nil, &apiError{503, "Selected account failed its health check: " + reason, 0}
+		}
+		return []*account{a}, nil
 	}
 	eligible := make([]*account, 0, len(p.accounts))
 	for _, a := range p.accounts {
@@ -484,7 +499,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		items := make([]map[string]any, 0, len(p.accounts))
 		for _, a := range p.accounts {
 			n := accountCooldown(a)
-			items = append(items, map[string]any{"id": a.config.ID, "website_id": a.config.WebsiteID, "enabled": !a.config.Disabled, "available": n == 0 && !a.config.Disabled, "cooldown_seconds": n})
+			items = append(items, map[string]any{"id": a.config.ID, "key": accountKey(a.config.WebsiteID, a.config.ID), "website_id": a.config.WebsiteID, "enabled": !a.config.Disabled, "available": n == 0 && !a.config.Disabled, "cooldown_seconds": n})
 		}
 		writeJSON(w, 200, map[string]any{"object": "list", "data": items})
 		return
