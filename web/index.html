@@ -4,28 +4,328 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="Quản lý website và tài khoản Open WebUI qua một cổng API thống nhất.">
-  <title>WebUI Proxy · Trung tâm quản lý</title>
+  <meta name="description" content="Bảng điều khiển trung tâm: quản lý website, tài khoản và cổng API tương thích OpenAI.">
+  <title>Proxy Console</title>
   <link rel="stylesheet" href="/assets/style.css">
   <script src="/assets/app.js" defer></script>
 </head>
 <body>
   <section id="login-screen" class="login-screen" aria-labelledby="login-title">
-    <div class="login-art" aria-hidden="true"><span class="brand-mark">W</span><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="art-content"><span class="eyebrow">MỘT CỔNG KẾT NỐI</span><h2>Nhiều website.<br>Một không gian.</h2><p>Kết nối các phiên bản Open WebUI, điều phối tài khoản và khám phá mô hình trong cùng một nơi.</p><div class="art-badge"><span class="status-dot"></span> Go powered · OpenAI compatible</div></div></div>
-    <div class="login-panel"><form id="login-form" class="login-card"><span class="eyebrow">TRUNG TÂM ĐIỀU KHIỂN</span><h1 id="login-title">Chào mừng trở lại<span class="accent">.</span></h1><p class="muted">Nhập khóa quản trị để mở không gian làm việc của bạn.</p><label for="api-key">Khóa API quản trị</label><input id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="Nhập ADMIN_API_KEY" minlength="5" required><p class="field-help">Dùng ADMIN_API_KEY, hoặc PROXY_API_KEY khi chưa đặt khóa quản trị. Khóa chỉ được giữ trong bộ nhớ của phiên này.</p><p id="login-error" class="error-message" role="alert" hidden></p><button id="login-submit" class="button primary wide" type="submit">Mở bảng điều khiển <span aria-hidden="true">→</span></button><p class="login-footnote">Không lưu khóa trên trình duyệt · Không cần tiện ích bổ sung</p></form></div>
+    <div class="login-glow" aria-hidden="true"></div>
+    <div class="login-panel">
+      <form id="login-form" class="login-card">
+        <div class="login-brand">
+          <span class="logo-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="M12 12v9"/><path d="m4 7.5 8 4.5 8-4.5"/></svg>
+          </span>
+          <span class="login-brand-text">Proxy<span>Console</span></span>
+        </div>
+        <h1 id="login-title">Đăng nhập</h1>
+        <p class="login-sub">Nhập khoá quản trị để mở bảng điều khiển.</p>
+        <div class="field">
+          <label for="api-key">Khoá quản trị</label>
+          <input id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="ADMIN_API_KEY" minlength="5" required>
+        </div>
+        <p id="login-error" class="alert" role="alert" hidden></p>
+        <button id="login-submit" class="btn btn-primary btn-block" type="submit">Mở bảng điều khiển</button>
+        <p class="login-hint">Dùng <code>ADMIN_API_KEY</code> (hoặc <code>PROXY_API_KEY</code> nếu chưa đặt). Khoá chỉ giữ trong bộ nhớ phiên.</p>
+      </form>
+    </div>
   </section>
+
   <div id="app-shell" class="app-shell" hidden>
-    <aside class="sidebar"><a class="brand" href="#dashboard" aria-label="WebUI Proxy — tổng quan"><span class="brand-mark">W</span><span>WebUI<span class="brand-light"> Proxy</span><small>MANAGEMENT CONSOLE</small></span></a><div class="nav-label">KHÔNG GIAN LÀM VIỆC</div><nav aria-label="Điều hướng chính"><button class="nav-item active" data-page="dashboard" type="button"><span aria-hidden="true">▦</span> Dashboard</button><button class="nav-item" data-page="websites" type="button"><span aria-hidden="true">◎</span> Websites <span id="nav-sites-count" class="nav-count">0</span></button><button class="nav-item" data-page="accounts" type="button"><span aria-hidden="true">♙</span> Accounts <span id="nav-accounts-count" class="nav-count">0</span></button><button class="nav-item" data-page="playground" type="button"><span aria-hidden="true">✧</span> Playground</button></nav><div class="sidebar-bottom"><div class="connection"><span class="status-dot"></span><span>Phiên quản trị đang mở<small id="sidebar-version">WebUI Proxy</small></span></div><button id="logout-button" class="button ghost wide" type="button">Đăng xuất <span aria-hidden="true">↗</span></button></div></aside>
-    <main class="main"><header class="topbar"><div><span class="eyebrow">WEBUI PROXY / QUẢN LÝ</span><h1 id="page-title">Dashboard</h1></div><div class="topbar-actions"><span id="revision-label" class="subtle-tag">rev —</span><button id="refresh-button" class="button secondary" type="button"><span aria-hidden="true">↻</span> Làm mới</button></div></header><div id="global-notice" class="notice" role="status" hidden></div>
-      <section id="page-dashboard" class="page" aria-labelledby="dashboard-heading"><div class="page-intro"><div><span class="eyebrow accent">TỔNG QUAN HỆ THỐNG</span><h2 id="dashboard-heading">Mọi kết nối, trong tầm tay.</h2><p>Theo dõi website, tài khoản và cổng API của bạn.</p></div><span class="live-badge"><span class="status-dot"></span> Quản trị tập trung</span></div><div id="stats-grid" class="stats-grid"></div><div class="dashboard-grid"><article class="card api-card"><div class="card-heading"><div><span class="eyebrow">DÀNH CHO ỨNG DỤNG</span><h3>Một API. Nhiều lựa chọn.</h3></div><span class="icon-tile" aria-hidden="true">⌘</span></div><p class="muted">Sử dụng endpoint tương thích OpenAI để kết nối các ứng dụng của bạn.</p><label for="api-base">API base URL</label><div class="copy-field"><input id="api-base" readonly><button id="copy-api-button" class="button secondary" type="button">Sao chép</button></div><div class="code-example"><span class="code-label">HEADER ĐỊNH TUYẾN</span><pre>Authorization: Bearer &lt;PROXY_API_KEY&gt;
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="logo-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="M12 12v9"/><path d="m4 7.5 8 4.5 8-4.5"/></svg>
+        </span>
+        <span class="brand-text">Proxy<span>Console</span></span>
+      </div>
+      <nav class="nav" aria-label="Điều hướng chính">
+        <span class="nav-label">Quản lý</span>
+        <button class="nav-item active" data-page="dashboard" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+          <span>Tổng quan</span>
+        </button>
+        <button class="nav-item" data-page="websites" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/></svg>
+          <span>Website</span>
+          <span id="nav-sites-count" class="nav-count">0</span>
+        </button>
+        <button class="nav-item" data-page="accounts" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>
+          <span>Tài khoản</span>
+          <span id="nav-accounts-count" class="nav-count">0</span>
+        </button>
+        <span class="nav-label">Công cụ</span>
+        <button class="nav-item" data-page="playground" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.2 5.4 5.8.5-4.4 3.8 1.3 5.7L12 15.6 7.1 18.4l1.3-5.7L4 8.9l5.8-.5z"/></svg>
+          <span>Playground</span>
+        </button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="session">
+          <span class="dot dot-live"></span>
+          <span class="session-text">Đang kết nối<small id="sidebar-version">ProxyConsole</small></span>
+        </div>
+        <button id="logout-button" class="btn btn-ghost btn-block" type="button">Đăng xuất</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-title">
+          <h1 id="page-title">Tổng quan</h1>
+          <span id="revision-label" class="chip">rev —</span>
+        </div>
+        <div class="topbar-actions">
+          <button id="refresh-button" class="btn btn-soft" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+            Làm mới
+          </button>
+        </div>
+      </header>
+      <div id="global-notice" class="notice" role="status" hidden></div>
+
+      <section id="page-dashboard" class="page" aria-labelledby="dashboard-heading">
+        <div class="page-head">
+          <div>
+            <h2 id="dashboard-heading">Tổng quan</h2>
+            <p>Toàn bộ website, tài khoản và sức khoẻ kết nối trong một màn hình.</p>
+          </div>
+        </div>
+        <div id="stats-grid" class="stats-grid"></div>
+        <div class="dash-grid">
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <h3>Kết nối API</h3>
+                <p class="card-sub">Tương thích OpenAI, dùng chung một khoá proxy.</p>
+              </div>
+            </div>
+            <label for="api-base">Base URL</label>
+            <div class="copy-row">
+              <input id="api-base" readonly>
+              <button id="copy-api-button" class="btn btn-soft" type="button">Sao chép</button>
+            </div>
+            <div class="code-block">
+              <span class="code-label">Header định tuyến</span>
+              <pre>Authorization: Bearer &lt;PROXY_API_KEY&gt;
 X-Website-ID: &lt;website_id&gt;
-X-Account-ID: &lt;account_id&gt;  # tùy chọn</pre></div><p class="field-help">Bỏ X-Account-ID để hệ thống tự chọn tài khoản phù hợp trong website.</p></article><article class="card"><div class="card-heading"><div><span class="eyebrow">TÌNH TRẠNG KẾT NỐI</span><h3>Website của bạn</h3></div><button class="text-button" data-goto="websites" type="button">Xem tất cả →</button></div><div id="dashboard-sites" class="site-overview"></div></article></div><div class="footer-note"><span aria-hidden="true">◈</span><span id="persistence-note">Đang tải trạng thái lưu trữ.</span><span>Cập nhật OTA được thực hiện bằng CLI, không qua giao diện này.</span></div></section>
-      <section id="page-websites" class="page" aria-labelledby="websites-heading" hidden><div class="section-heading"><div><h2 id="websites-heading">Website đã kết nối</h2><p>Mỗi website là một phiên bản Open WebUI độc lập.</p></div><button id="add-website-button" class="button primary" type="button">＋ Thêm website</button></div><article class="card table-card"><div class="table-toolbar"><label class="search-label" for="website-search"><span aria-hidden="true">⌕</span><input id="website-search" type="search" placeholder="Tìm tên, ID hoặc URL…"></label><span id="website-total" class="muted"></span></div><div class="table-scroll"><table><thead><tr><th>Website</th><th>Địa chỉ Open WebUI</th><th>Tài khoản</th><th>Trạng thái</th><th>Proxy</th><th class="align-right">Thao tác</th></tr></thead><tbody id="website-rows"></tbody></table></div><div id="website-empty" class="empty-state" hidden><span class="empty-icon" aria-hidden="true">◎</span><h3>Chưa có website nào</h3><p>Thêm website Open WebUI đầu tiên để bắt đầu kết nối.</p></div></article></section>
-      <section id="page-accounts" class="page" aria-labelledby="accounts-heading" hidden><div class="section-heading"><div><h2 id="accounts-heading">Tài khoản truy cập</h2><p>Quản lý đăng nhập và tình trạng sẵn sàng theo từng website.</p></div><button id="add-account-button" class="button primary" type="button">＋ Thêm tài khoản</button></div><article class="card table-card"><div class="table-toolbar"><label class="search-label" for="account-search"><span aria-hidden="true">⌕</span><input id="account-search" type="search" placeholder="Tìm tên, ID hoặc email…"></label><label class="sr-only" for="account-filter">Lọc website</label><select id="account-filter"><option value="">Tất cả website</option></select></div><div class="table-scroll"><table><thead><tr><th>Tài khoản</th><th>Website</th><th>Trạng thái</th><th>Mật khẩu / Proxy</th><th class="align-right">Thao tác</th></tr></thead><tbody id="account-rows"></tbody></table></div><div id="account-empty" class="empty-state" hidden><span class="empty-icon" aria-hidden="true">♙</span><h3>Chưa có tài khoản phù hợp</h3><p>Thêm tài khoản cho website hoặc thay đổi bộ lọc.</p></div></article><p id="account-test-result" class="field-help" role="status"></p></section>
-      <section id="page-playground" class="page" aria-labelledby="playground-heading" hidden><div class="section-heading"><div><h2 id="playground-heading">Thử kết nối, khám phá mô hình.</h2><p>Gửi một yêu cầu trực tiếp và theo dõi phản hồi theo thời gian thực.</p></div><span class="subtle-tag">STREAMING SSE</span></div><div class="playground-grid"><form id="playground-form" class="card playground-config"><span class="eyebrow">CẤU HÌNH YÊU CẦU</span><label for="play-website">Website</label><select id="play-website" required></select><label for="play-account">Tài khoản</label><select id="play-account"><option value="">Tự động chọn</option></select><div class="model-label"><label for="play-model">Mô hình</label><button id="load-models-button" class="text-button" type="button">↻ Tải mô hình</button></div><select id="play-model" required><option value="">Tải danh sách mô hình trước</option></select><label for="play-prompt">Nội dung tin nhắn</label><textarea id="play-prompt" rows="7" placeholder="Ví dụ: Xin chào! Hãy giới thiệu ngắn gọn về bạn." required></textarea><div class="button-row"><button id="send-chat-button" class="button primary" type="submit">Gửi tin nhắn <span aria-hidden="true">↑</span></button><button id="stop-chat-button" class="button danger" type="button" disabled>Dừng</button></div><p id="play-status" class="field-help" role="status">Chọn website rồi tải danh sách mô hình.</p></form><article class="card response-card"><div class="card-heading"><div><span class="eyebrow">KẾT QUẢ TRỰC TIẾP</span><h3>Phản hồi từ mô hình</h3></div><span id="response-status" class="subtle-tag">Sẵn sàng</span></div><div id="response-empty" class="response-empty"><span aria-hidden="true">✧</span><h3>Một ý tưởng mới bắt đầu từ đây.</h3><p>Phản hồi sẽ xuất hiện khi bạn gửi tin nhắn.</p></div><pre id="chat-output" aria-live="polite" aria-atomic="false"></pre></article></div></section>
+X-Account-ID: &lt;account_id&gt;  <span class="code-comment"># tuỳ chọn</span></pre>
+            </div>
+            <p class="hint">Bỏ <code>X-Account-ID</code> để proxy tự chọn tài khoản còn sẵn sàng trong website.</p>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <h3>Website</h3>
+                <p class="card-sub">Tình trạng kết nối hiện tại.</p>
+              </div>
+              <button class="link-btn" data-goto="websites" type="button">Xem tất cả</button>
+            </div>
+            <div id="dashboard-sites" class="site-list"></div>
+          </article>
+        </div>
+        <div class="foot-note">
+          <span id="persistence-note">Đang tải trạng thái lưu trữ.</span>
+          <span>Cập nhật OTA thực hiện qua CLI, không qua giao diện.</span>
+        </div>
+      </section>
+
+      <section id="page-websites" class="page" aria-labelledby="websites-heading" hidden>
+        <div class="page-head">
+          <div>
+            <h2 id="websites-heading">Website</h2>
+            <p>Mỗi website là một phiên bản upstream độc lập.</p>
+          </div>
+          <button id="add-website-button" class="btn btn-primary" type="button">Thêm website</button>
+        </div>
+        <article class="card table-card">
+          <div class="toolbar">
+            <label class="search" for="website-search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+              <input id="website-search" type="search" placeholder="Tìm tên, ID hoặc URL…">
+            </label>
+            <span id="website-total" class="muted"></span>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Website</th><th>Địa chỉ</th><th>Tài khoản</th><th>Trạng thái</th><th>Proxy</th><th class="align-right">Thao tác</th></tr></thead>
+              <tbody id="website-rows"></tbody>
+            </table>
+          </div>
+          <div id="website-empty" class="empty" hidden>
+            <h3>Chưa có website nào</h3>
+            <p>Thêm website upstream đầu tiên để bắt đầu.</p>
+          </div>
+        </article>
+      </section>
+
+      <section id="page-accounts" class="page" aria-labelledby="accounts-heading" hidden>
+        <div class="page-head">
+          <div>
+            <h2 id="accounts-heading">Tài khoản</h2>
+            <p>Đăng nhập, backend và tình trạng sẵn sàng của từng tài khoản.</p>
+          </div>
+          <button id="add-account-button" class="btn btn-primary" type="button">Thêm tài khoản</button>
+        </div>
+        <article class="card table-card">
+          <div class="toolbar">
+            <label class="search" for="account-search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+              <input id="account-search" type="search" placeholder="Tìm tên, ID hoặc email…">
+            </label>
+            <label class="sr-only" for="account-filter">Lọc website</label>
+            <select id="account-filter"><option value="">Tất cả website</option></select>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Tài khoản</th><th>Website</th><th>Trạng thái</th><th>Bí mật / Proxy</th><th class="align-right">Thao tác</th></tr></thead>
+              <tbody id="account-rows"></tbody>
+            </table>
+          </div>
+          <div id="account-empty" class="empty" hidden>
+            <h3>Chưa có tài khoản phù hợp</h3>
+            <p>Thêm tài khoản cho website hoặc đổi bộ lọc.</p>
+          </div>
+        </article>
+        <p id="account-test-result" class="hint" role="status"></p>
+      </section>
+
+      <section id="page-playground" class="page" aria-labelledby="playground-heading" hidden>
+        <div class="page-head">
+          <div>
+            <h2 id="playground-heading">Playground</h2>
+            <p>Gửi thử một yêu cầu và xem phản hồi streaming theo thời gian thực.</p>
+          </div>
+          <span class="chip">SSE</span>
+        </div>
+        <div class="play-grid">
+          <form id="playground-form" class="card">
+            <div class="card-head"><h3>Cấu hình yêu cầu</h3></div>
+            <div class="field">
+              <label for="play-website">Website</label>
+              <select id="play-website" required></select>
+            </div>
+            <div class="field">
+              <label for="play-account">Tài khoản</label>
+              <select id="play-account"><option value="">Tự động chọn</option></select>
+            </div>
+            <div class="field">
+              <div class="label-row">
+                <label for="play-model">Mô hình</label>
+                <button id="load-models-button" class="link-btn" type="button">Tải mô hình</button>
+              </div>
+              <select id="play-model" required><option value="">Tải danh sách mô hình trước</option></select>
+            </div>
+            <div class="field">
+              <label for="play-prompt">Tin nhắn</label>
+              <textarea id="play-prompt" rows="7" placeholder="Ví dụ: Xin chào! Hãy giới thiệu ngắn gọn về bạn." required></textarea>
+            </div>
+            <div class="btn-row">
+              <button id="send-chat-button" class="btn btn-primary" type="submit">Gửi</button>
+              <button id="stop-chat-button" class="btn btn-danger" type="button" disabled>Dừng</button>
+            </div>
+            <p id="play-status" class="hint" role="status">Chọn website rồi tải danh sách mô hình.</p>
+          </form>
+          <article class="card">
+            <div class="card-head">
+              <h3>Phản hồi</h3>
+              <span id="response-status" class="chip">Sẵn sàng</span>
+            </div>
+            <div id="response-empty" class="empty">
+              <h3>Chưa có phản hồi</h3>
+              <p>Nội dung sẽ xuất hiện khi bạn gửi tin nhắn.</p>
+            </div>
+            <pre id="chat-output" aria-live="polite" aria-atomic="false"></pre>
+          </article>
+        </div>
+      </section>
     </main>
   </div>
-  <dialog id="editor-dialog" aria-labelledby="editor-title"><form id="editor-form"><div class="dialog-heading"><div><span id="editor-eyebrow" class="eyebrow">CẤU HÌNH KẾT NỐI</span><h2 id="editor-title">Thêm website</h2></div><button id="close-editor-button" class="icon-button" type="button" aria-label="Đóng hộp thoại">×</button></div><div class="dialog-body"><label for="entity-id">ID <span class="required">*</span></label><input id="entity-id" name="id" pattern="[A-Za-z0-9_.\-]{1,64}" maxlength="64" required autocomplete="off"><p class="field-help">1–64 ký tự ASCII: chữ, số, dấu chấm, gạch dưới hoặc gạch ngang. ID cố định sau khi tạo.</p><label for="entity-name">Tên hiển thị <span class="optional">tùy chọn</span></label><input id="entity-name" name="name" maxlength="160" placeholder="Để trống sẽ dùng ID"><div id="website-fields"><label for="entity-url">Địa chỉ Open WebUI <span class="required">*</span></label><input id="entity-url" name="base_url" type="url" placeholder="https://webui.example.com"></div><div id="account-fields" hidden><label for="entity-website">Website <span class="required">*</span></label><select id="entity-website" name="website_id"></select><label for="entity-backend">Loại backend</label><select id="entity-backend" name="backend"><option value="openwebui">Open WebUI (email + mật khẩu)</option><option value="librechat">LibreChat Agents API (API key)</option></select><label for="entity-api-key">Agent API key <span class="optional">chỉ LibreChat</span></label><input id="entity-api-key" name="api_key" type="password" autocomplete="new-password" placeholder="Để trống khi chỉnh sửa để giữ khóa hiện tại"><label for="entity-email">Email <span class="optional">Open WebUI</span></label><input id="entity-email" name="email" type="email" autocomplete="off"><label for="entity-password">Mật khẩu</label><input id="entity-password" name="password" type="password" autocomplete="new-password"><p id="password-help" class="field-help">Để trống khi chỉnh sửa để giữ mật khẩu hiện tại.</p></div><label for="entity-proxy">Proxy riêng <span class="optional">tùy chọn</span></label><input id="entity-proxy" name="proxy_url" type="password" autocomplete="new-password" placeholder="http://user:password@host:port"><p class="field-help">Để trống khi tạo để dùng cấu hình mặc định. Khi chỉnh sửa, để trống để giữ cấu hình hiện tại.</p><label id="clear-proxy-label" class="checkbox-label" for="clear-proxy"><input id="clear-proxy" type="checkbox"> Xóa proxy riêng (gửi giá trị rỗng)</label><label class="checkbox-label enabled-check" for="entity-enabled"><input id="entity-enabled" type="checkbox" checked> Bật kết nối này</label><p id="editor-error" class="error-message" role="alert" hidden></p></div><div class="dialog-footer"><button id="cancel-editor-button" class="button secondary" type="button">Hủy</button><button id="save-entity-button" class="button primary" type="submit">Lưu thay đổi</button></div></form></dialog>
-  <dialog id="delete-dialog" aria-labelledby="delete-title"><div class="dialog-heading"><h2 id="delete-title">Xác nhận xóa</h2></div><div class="dialog-body"><p id="delete-description"></p><p id="delete-error" class="error-message" role="alert" hidden></p></div><div class="dialog-footer"><button id="cancel-delete-button" class="button secondary" type="button">Giữ lại</button><button id="confirm-delete-button" class="button danger" type="button">Xóa vĩnh viễn</button></div></dialog>
+
+  <dialog id="editor-dialog" aria-labelledby="editor-title">
+    <form id="editor-form">
+      <div class="dialog-head">
+        <div>
+          <span id="editor-eyebrow" class="dialog-eyebrow">Cấu hình</span>
+          <h2 id="editor-title">Thêm website</h2>
+        </div>
+        <button id="close-editor-button" class="icon-btn" type="button" aria-label="Đóng">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="dialog-body">
+        <div class="field">
+          <label for="entity-id">ID <span class="req">*</span></label>
+          <input id="entity-id" name="id" pattern="[A-Za-z0-9_.\-]{1,64}" maxlength="64" required autocomplete="off">
+          <p class="hint">1–64 ký tự ASCII: chữ, số, chấm, gạch dưới, gạch ngang. Không đổi được sau khi tạo.</p>
+        </div>
+        <div class="field">
+          <label for="entity-name">Tên hiển thị <span class="opt">tuỳ chọn</span></label>
+          <input id="entity-name" name="name" maxlength="160" placeholder="Để trống sẽ dùng ID">
+        </div>
+        <div id="website-fields">
+          <div class="field">
+            <label for="entity-url">Địa chỉ upstream <span class="req">*</span></label>
+            <input id="entity-url" name="base_url" type="url" placeholder="https://webui.example.com">
+          </div>
+        </div>
+        <div id="account-fields" hidden>
+          <div class="field">
+            <label for="entity-website">Website <span class="req">*</span></label>
+            <select id="entity-website" name="website_id"></select>
+          </div>
+          <div class="field">
+            <label for="entity-backend">Backend</label>
+            <select id="entity-backend" name="backend">
+              <option value="openwebui">Open WebUI — email + mật khẩu</option>
+              <option value="librechat">LibreChat Agents — API key</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="entity-api-key">Agent API key <span class="opt">chỉ LibreChat</span></label>
+            <input id="entity-api-key" name="api_key" type="password" autocomplete="new-password" placeholder="Để trống khi sửa để giữ khoá hiện tại">
+          </div>
+          <div class="field">
+            <label for="entity-email">Email <span class="opt">tuỳ chọn với LibreChat</span></label>
+            <input id="entity-email" name="email" type="email" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="entity-password">Mật khẩu</label>
+            <input id="entity-password" name="password" type="password" autocomplete="new-password">
+            <p id="password-help" class="hint">Để trống khi sửa để giữ mật khẩu hiện tại.</p>
+          </div>
+        </div>
+        <div class="field">
+          <label for="entity-proxy">Proxy riêng <span class="opt">tuỳ chọn</span></label>
+          <input id="entity-proxy" name="proxy_url" type="password" autocomplete="new-password" placeholder="http://user:password@host:port">
+          <p class="hint">Để trống khi tạo để dùng cấu hình mặc định.</p>
+        </div>
+        <label id="clear-proxy-label" class="check" for="clear-proxy"><input id="clear-proxy" type="checkbox"> Xoá proxy riêng</label>
+        <label class="check" for="entity-enabled"><input id="entity-enabled" type="checkbox" checked> Bật kết nối này</label>
+        <p id="editor-error" class="alert" role="alert" hidden></p>
+      </div>
+      <div class="dialog-foot">
+        <button id="cancel-editor-button" class="btn btn-soft" type="button">Huỷ</button>
+        <button id="save-entity-button" class="btn btn-primary" type="submit">Lưu</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="delete-dialog" aria-labelledby="delete-title">
+    <div class="dialog-head">
+      <h2 id="delete-title">Xác nhận xoá</h2>
+    </div>
+    <div class="dialog-body">
+      <p id="delete-description"></p>
+      <p id="delete-error" class="alert" role="alert" hidden></p>
+    </div>
+    <div class="dialog-foot">
+      <button id="cancel-delete-button" class="btn btn-soft" type="button">Giữ lại</button>
+      <button id="confirm-delete-button" class="btn btn-danger" type="button">Xoá</button>
+    </div>
+  </dialog>
 </body>
 </html>

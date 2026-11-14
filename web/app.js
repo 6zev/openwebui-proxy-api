@@ -3,6 +3,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const pages = ['dashboard', 'websites', 'accounts', 'playground'];
+  const pageTitles = { dashboard: 'Tổng quan', websites: 'Website', accounts: 'Tài khoản', playground: 'Playground' };
   let key = '';
   let state = { websites: [], accounts: [] };
   let session = 0;
@@ -136,7 +137,7 @@
       if (active) button.setAttribute('aria-current', 'page');
       else button.removeAttribute('aria-current');
     }
-    $('page-title').textContent = current.charAt(0).toUpperCase() + current.slice(1);
+    $('page-title').textContent = pageTitles[current] || current;
   }
 
   function renderDashboard() {
@@ -159,8 +160,8 @@
     const overview = $('dashboard-sites');
     overview.replaceChildren();
     if (!state.websites.length) {
-      const empty = node('div', 'empty-state');
-      empty.append(node('span', 'empty-icon', '◎'), node('h3', '', 'Không gian mới đang chờ bạn'), node('p', '', 'Thêm website đầu tiên trong mục Websites.'));
+      const empty = node('div', 'empty');
+      empty.append(node('h3', '', 'Chưa có website nào'), node('p', '', 'Thêm website đầu tiên trong mục Website.'));
       overview.append(empty);
     }
     for (const site of state.websites.slice(0, 5)) {
