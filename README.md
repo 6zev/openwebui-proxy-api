@@ -218,7 +218,8 @@ Mỗi acc có thể trỏ tới **Open WebUI** (mặc định, email + mật kh�
 {"id":"agent1","website_id":"lc","backend":"librechat","api_key":"lc_agent_key_xxx"}
 ```
 
-- LibreChat **không cần email/mật khẩu**; acc `librechat` bị từ chối nếu có `password`.
+- LibreChat **chỉ dùng `api_key`**: acc `librechat` bị từ chối nếu có `email` hoặc `password`, và khi đổi backend sang `librechat` proxy tự xoá credential cũ khỏi config.
+- Chọn LibreChat trong WebUI sẽ ẩn hẳn ô Email/Mật khẩu.
 - ánh xạ: `/v1/chat/completions` → `/api/agents/v1/chat/completions`, `/v1/models` → `/api/agents/v1/models` (ID là `agent_…`), `/v1/responses` → `/api/agents/v1/responses`, `/v1/events*` → `/api/agents/v1/events*`, `/v1/agents*` và `/v1/skills*` → management API.
 - `POST /v1/events` **bắt buộc** header `Idempotency-Key` (1–256 ký tự `A-Za-z0-9._~:/+=-`), được chuyển tiếp nguyên vẹn; thiếu/sai → `400` trước khi gọi upstream.
 - Không có bước login/refresh: key tĩnh gửi thẳng mỗi request, `401` **không** tự đăng nhập lại (an toàn cho events).

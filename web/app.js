@@ -203,7 +203,7 @@
       const test = action(testing.has(account.id) ? 'Đang thử…' : 'Kiểm tra', 'test-account', account.id);
       test.disabled = testing.has(account.id);
       controls.append(test, action('Sửa', 'edit-account', account.id), action('Xóa', 'delete-account', account.id, true));
-      row.append(cell(node('strong', '', account.name || account.id), node('small', '', account.email || '—'), node('small', '', account.id)), cell(node('span', '', websiteName(account.website_id))), cell(status(account)), cell(node('span', '', account.backend === 'librechat' ? (account.has_api_key ? 'Agent key: đã lưu' : 'Agent key: chưa có') : (account.has_password ? 'Mật khẩu: đã lưu' : 'Mật khẩu: chưa có')), node('small', '', account.proxy_configured ? 'Proxy: đã cấu hình' : 'Proxy: mặc định / kế thừa')), cell(controls));
+      row.append(cell(node('strong', '', account.name || account.id), node('small', '', account.email || '—'), node('small', '', account.id)), cell(node('span', '', websiteName(account.website_id))), cell(status(account)), cell(node('span', '', account.backend === 'librechat' ? (account.has_api_key ? 'Agent key: đã lưu' : 'Agent key: chưa có') : (account.has_password ? 'Mật khẩu: đã lưu' : 'Mật khẩu: chưa có')), node('small', '', account.backend === 'librechat' ? 'backend: LibreChat Agents' : 'backend: Open WebUI'), node('small', '', account.proxy_configured ? 'Proxy: đã cấu hình' : 'Proxy: mặc định / kế thừa')), cell(controls));
       return row;
     }));
     $('account-empty').hidden = accounts.length !== 0;
@@ -353,8 +353,16 @@
 
   function syncBackendFields() {
     const libre = backendKind() === 'librechat';
-    $('entity-email').required = !libre;
-    $('entity-password').required = !libre && !editor?.id;
+    // LibreChat has no email/password pair at all, so hide those inputs instead
+    // of leaving dead optional fields in the form.
+    for (const id of ['entity-email', 'entity-password']) {
+      const field = $(id).closest('.field');
+      if (field) field.hidden = libre;
+      $(id).disabled = libre;
+      $(id).required = !libre && (id === 'entity-email' || !editor?.id);
+    }
+    const help = $('password-help');
+    if (help) help.hidden = libre;
   }
 
   function backendKind() {
@@ -387,9 +395,6 @@
         const apiKey = $('entity-api-key').value.trim();
         if (apiKey) body.api_key = apiKey;
         if (!apiKey && !(context.id && entityHasKey(context.id))) { showError('editor-error', 'Nhập Agent API key cho tài khoản LibreChat.'); return; }
-        // email/password are optional metadata for LibreChat (reuse the same form).
-        body.email = $('entity-email').value.trim();
-        if ($('entity-password').value) body.password = $('entity-password').value;
       } else {
         body.email = $('entity-email').value.trim();
         if ($('entity-password').value) body.password = $('entity-password').value;

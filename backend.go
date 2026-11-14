@@ -60,10 +60,10 @@ func validateBackendAccount(a AccountConfig) error {
 		return nil
 	case BackendLibreChat:
 		// LibreChat authenticates every request with a static Agent API key.
-		// email/password are optional metadata (never sent over the wire) so a
-		// LibreChat acc can reuse the same form as Open WebUI accounts.
-		if a.Password != "" && len(a.Password) > 8192 {
-			return errors.New("librechat account password is too long")
+		// No email/password pair exists for this backend: anything stored there
+		// would be dead weight, so it is rejected instead of silently kept.
+		if strings.TrimSpace(a.Email) != "" || a.Password != "" {
+			return errors.New("librechat accounts use only api_key; remove email and password")
 		}
 		if len(a.APIKey) < minLibreChatAPIKeyLength {
 			return errors.New("librechat accounts require an api_key")
@@ -75,9 +75,6 @@ func validateBackendAccount(a AccountConfig) error {
 			return r <= ' ' || r >= 0x7f
 		}) {
 			return errors.New("librechat account api_key must be printable without spaces")
-		}
-		if len(strings.TrimSpace(a.Email)) > 320 {
-			return errors.New("librechat account email is too long")
 		}
 		return nil
 	default:

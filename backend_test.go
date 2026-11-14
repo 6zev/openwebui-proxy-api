@@ -23,12 +23,13 @@ func TestValidateBackendAccountMatrix(t *testing.T) {
 		{name: "openwebui missing password", account: AccountConfig{ID: "a", Email: "a@example.test"}, wantErr: true},
 		{name: "openwebui with api key only", account: AccountConfig{ID: "a", APIKey: "k12345678"}, wantErr: true},
 		{name: "librechat with api key", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k12345678"}},
-		{name: "librechat with api key and display email", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k12345678", Email: "bot@example.test"}},
-		{name: "librechat missing api key", account: AccountConfig{ID: "a", Backend: BackendLibreChat, Email: "bot@example.test"}, wantErr: true},
+		{name: "librechat with api key", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k12345678"}},
+		{name: "librechat missing api key", account: AccountConfig{ID: "a", Backend: BackendLibreChat}, wantErr: true},
+		{name: "librechat rejects email", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k12345678", Email: "bot@example.test"}, wantErr: true},
 		{name: "librechat short api key", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k123456"}, wantErr: true},
 		{name: "librechat api key at minimum length", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k1234567"}},
 		{name: "librechat api key with space", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k1234 678"}, wantErr: true},
-		{name: "librechat with optional password metadata", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k12345678", Password: "pw"}, wantErr: false},
+		{name: "librechat rejects password", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k12345678", Password: "pw"}, wantErr: true},
 		{name: "unknown backend", account: AccountConfig{ID: "a", Backend: BackendKind("ollama"), Email: "a@example.test", Password: "pw", APIKey: "k12345678"}, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

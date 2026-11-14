@@ -407,6 +407,12 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 		if draft.APIKey != nil && strings.TrimSpace(*draft.APIKey) != "" {
 			account.APIKey = strings.TrimSpace(*draft.APIKey)
 		}
+		// Switching an account to LibreChat clears the Open WebUI credentials so
+		// no dead secret is left behind in the stored config.
+		if normalizeBackend(account.Backend) == BackendLibreChat {
+			account.Email = ""
+			account.Password = ""
+		}
 		if draft.Enabled != nil {
 			account.Disabled = !*draft.Enabled
 		}

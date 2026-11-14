@@ -41,6 +41,9 @@ type adminTestState struct {
 		ProxyConfigured bool   `json:"proxy_configured"`
 		Available       bool   `json:"available"`
 		CooldownSeconds int    `json:"cooldown_seconds"`
+		Backend         string `json:"backend"`
+		HasAPIKey       bool   `json:"has_api_key"`
+		Health          string `json:"health"`
 	} `json:"accounts"`
 }
 
@@ -584,4 +587,36 @@ func TestAdminConcurrentCRUDDoesNotLoseUpdates(t *testing.T) {
 	if state := adminTestReadState(t, s); len(state.Accounts) != 0 {
 		t.Errorf("concurrent deletes left %d accounts", len(state.Accounts))
 	}
+}
+
+// TestAdminLibreChatAccountDropsCredentials guards the LibreChat contract: the
+// backend has no email/password pair, so switching an account to it must clear
+// any stored credentials instead of persisting dead secrets.
+func TestAdminLibreChatAccountDropsCredentials(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	cfg := proxyTestConfig(u, "owui")
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "config.json")
+	s := adminTestServer(t, cfg, adminTestKey)
+	adminTestAddWebsite(t, s, "lc", u.server.URL)
+	adminTestMutation(t, s, "PUT", "/api/admin/accounts/owui", map[string]any{
+		"website_id": "lc",
+		"backend":    "librechat",
+		"api_key":    "k12345678",
+		"email":      "bot@example.test",
+		"password":   "hidden",
+	})
+	state := adminTestReadState(t, s)
+	for _, account := range state.Accounts {
+		if account.ID != "owui" {
+			continue
+		}
+		if account.Email != "" || account.HasPassword {
+			t.Fatalf("librechat account kept credentials: %+v", account)
+		}
+		if !account.HasAPIKey {
+			t.Fatalf("librechat account lost its api key: %+v", account)
+		}
+		return
+	}
+	t.Fatalf("owui missing from state")
 }
