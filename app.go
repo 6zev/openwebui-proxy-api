@@ -110,7 +110,7 @@ func (a *Application) state(w http.ResponseWriter) {
 	sites := make([]map[string]any, 0, len(cfg.Websites))
 	accounts := make([]map[string]any, 0, len(cfg.Accounts))
 	for _, s := range cfg.Websites {
-		sites = append(sites, map[string]any{"id": s.ID, "name": displayName(s.ID, s.Name), "base_url": s.BaseURL, "enabled": !s.Disabled, "proxy_url": redactedProxy(s.ProxyURL), "proxy_configured": s.ProxyURL != ""})
+		sites = append(sites, map[string]any{"id": s.ID, "name": displayName(s.ID, s.Name), "stored_name": s.Name, "base_url": s.BaseURL, "enabled": !s.Disabled, "proxy_url": redactedProxy(s.ProxyURL), "proxy_configured": s.ProxyURL != ""})
 	}
 	for _, c := range cfg.Accounts {
 		available := false
@@ -125,7 +125,7 @@ func (a *Application) state(w http.ResponseWriter) {
 				break
 			}
 		}
-		accounts = append(accounts, map[string]any{"id": c.ID, "name": displayName(c.ID, c.Name), "website_id": c.WebsiteID, "email": c.Email, "backend": string(c.Backend), "has_api_key": c.APIKey != "", "enabled": !c.Disabled, "has_password": c.Password != "", "proxy_url": redactedProxy(c.ProxyURL), "proxy_configured": c.ProxyURL != "", "available": available, "cooldown_seconds": cooldown, "health": health})
+		accounts = append(accounts, map[string]any{"id": c.ID, "name": displayName(c.ID, c.Name), "stored_name": c.Name, "website_id": c.WebsiteID, "email": c.Email, "backend": string(c.Backend), "has_api_key": c.APIKey != "", "enabled": !c.Disabled, "has_password": c.Password != "", "proxy_url": redactedProxy(c.ProxyURL), "proxy_configured": c.ProxyURL != "", "available": available, "cooldown_seconds": cooldown, "health": health})
 	}
 	writeJSON(w, 200, map[string]any{"version": Version, "revision": revision, "persistent": cfg.ConfigPath != "", "websites": sites, "accounts": accounts, "api_base_path": "/v1"})
 }

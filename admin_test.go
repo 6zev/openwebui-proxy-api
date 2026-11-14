@@ -645,3 +645,32 @@ func TestWebUIShipsNoInlineStyle(t *testing.T) {
 		}
 	}
 }
+
+// TestAdminStateExposesStoredName guards the editor prefill: `name` is a display
+// fallback (id when empty), so the raw value must be available separately or the
+// form would write the id back as a real name.
+func TestAdminStateExposesStoredName(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	cfg := proxyTestConfig(u, "acc")
+	cfg.Websites = []WebsiteConfig{{ID: "site", Name: "", BaseURL: u.server.URL}}
+	cfg.Accounts[0].WebsiteID = "site"
+	s := adminTestServer(t, cfg, adminTestKey)
+	body := adminTestRequest(t, s, http.MethodGet, "/api/admin/state", "", adminTestKey, nil)
+	requireProxyStatus(t, body, 200)
+	var decoded struct {
+		Accounts []map[string]any `json:"accounts"`
+		Websites []map[string]any `json:"websites"`
+	}
+	if err := json.Unmarshal([]byte(body.body), &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if name, ok := decoded.Accounts[0]["stored_name"]; !ok || name != "" {
+		t.Errorf("account stored_name = %v (present %v), want empty string", name, ok)
+	}
+	if name, ok := decoded.Websites[0]["stored_name"]; !ok || name != "" {
+		t.Errorf("website stored_name = %v (present %v), want empty string", name, ok)
+	}
+	if decoded.Accounts[0]["name"] != "acc" {
+		t.Errorf("display name fallback broken: %v", decoded.Accounts[0]["name"])
+	}
+}

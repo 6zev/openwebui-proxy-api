@@ -651,6 +651,16 @@ td small {
 }
 #chat-output:empty { display: none; }
 
+
+/* Backend-specific credential groups: LibreChat authenticates with an API key
+   only, so the Open WebUI email/password pair must not occupy layout space
+   while that backend is selected. */
+[data-backend-field="openwebui"].field-hidden,
+[data-backend-field="librechat"].field-hidden,
+.field[hidden] {
+  display: none !important;
+}
+
 /* ---------- Dialogs ---------- */
 
 dialog {

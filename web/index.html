@@ -284,15 +284,15 @@ X-Account-ID: &lt;account_id&gt;  <span class="code-comment"># tuỳ chọn</spa
               <option value="librechat">LibreChat Agents — API key</option>
             </select>
           </div>
-          <div class="field">
-            <label for="entity-api-key">Agent API key <span class="opt">chỉ LibreChat</span></label>
+          <div class="field" data-backend-field="librechat">
+            <label for="entity-api-key">Agent API key <span class="req">*</span></label>
             <input id="entity-api-key" name="api_key" type="password" autocomplete="new-password" placeholder="Để trống khi sửa để giữ khoá hiện tại">
           </div>
-          <div class="field">
-            <label for="entity-email">Email <span class="opt">tuỳ chọn với LibreChat</span></label>
+          <div class="field" data-backend-field="openwebui">
+            <label for="entity-email">Email <span class="req">*</span></label>
             <input id="entity-email" name="email" type="email" autocomplete="off">
           </div>
-          <div class="field">
+          <div class="field" data-backend-field="openwebui">
             <label for="entity-password">Mật khẩu</label>
             <input id="entity-password" name="password" type="password" autocomplete="new-password">
             <p id="password-help" class="hint">Để trống khi sửa để giữ mật khẩu hiện tại.</p>

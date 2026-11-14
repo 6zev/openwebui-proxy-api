@@ -334,7 +334,7 @@
     $('password-help').textContent = entity ? 'Để trống để giữ mật khẩu hiện tại.' : 'Nhập mật khẩu đăng nhập tài khoản Open WebUI.';
     $('entity-id').value = entity?.id || '';
     $('entity-id').readOnly = Boolean(entity);
-    $('entity-name').value = entity?.name || '';
+    $('entity-name').value = entity?.stored_name || '';
     $('entity-url').value = entity?.base_url || '';
     $('entity-email').value = entity?.email || '';
     $('entity-backend').value = entity?.backend || 'openwebui';
@@ -355,19 +355,30 @@
   function syncBackendFields() {
     const libre = backendKind() === 'librechat';
     const isAccount = !$('account-fields').hidden;
+    // Drive visibility through one class so CSS owns layout; the per-field
+    // `hidden` attribute alone is easy to override and left gaps in the form.
+    $('account-fields').classList.toggle('is-librechat', libre);
     // LibreChat has no email/password pair at all, so hide those inputs instead
     // of leaving dead optional fields in the form. A hidden *and* required input
     // makes the browser refuse to submit ("not focusable"), so `required` must
     // always be cleared together with `hidden`.
-    for (const id of ['entity-email', 'entity-password']) {
+    // Hide the whole .field wrapper of each backend-only input; hiding the
+    // input alone still leaves the label and its spacing in the form.
+    const hideField = (id, hide) => {
       const input = $(id);
       const field = input.closest('.field');
-      const optional = libre || !isAccount;
-      if (field) field.hidden = optional;
-      input.disabled = !isAccount;
-      input.required = id === 'entity-email' ? !libre && isAccount : !libre && isAccount && !editor?.id;
-      if (optional) input.value = '';
-    }
+      if (field) field.classList.toggle('field-hidden', hide);
+      input.hidden = hide;
+      input.disabled = hide;
+      if (hide) input.value = '';
+      return !hide;
+    };
+    const showEmail = hideField('entity-email', libre || !isAccount);
+    $('entity-email').required = showEmail;
+    const showPassword = hideField('entity-password', libre || !isAccount);
+    $('entity-password').required = showPassword && !editor?.id;
+    const showAPIKey = hideField('entity-api-key', !libre || !isAccount);
+    $('entity-api-key').required = showAPIKey && !(editor?.id && entityHasKey(editor.id));
     const help = $('password-help');
     if (help) help.hidden = libre || !isAccount;
   }
@@ -403,8 +414,11 @@
         if (apiKey) body.api_key = apiKey;
         if (!apiKey && !(context.id && entityHasKey(context.id))) { showError('editor-error', 'Nhập Agent API key cho tài khoản LibreChat.'); return; }
       } else {
+        // Open WebUI backend: email is required, password optional on edit.
         body.email = $('entity-email').value.trim();
+        if (!body.email) { showError('editor-error', 'Nhập email cho tài khoản Open WebUI.'); return; }
         if ($('entity-password').value) body.password = $('entity-password').value;
+        else if (!context.id) { showError('editor-error', 'Nhập mật khẩu cho tài khoản Open WebUI.'); return; }
       }
     }
     if (context.id && $('clear-proxy').checked) body.proxy_url = '';
