@@ -620,3 +620,28 @@ func TestAdminLibreChatAccountDropsCredentials(t *testing.T) {
 	}
 	t.Fatalf("owui missing from state")
 }
+
+// TestAdminFaviconAvoidsUnauthorized keeps the browser's automatic favicon
+// request out of the API path: without this it 401s and clutters the console.
+func TestAdminFaviconAvoidsUnauthorized(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	s := adminTestServer(t, proxyTestConfig(u, "acc"), adminTestKey)
+	resp := adminTestRequest(t, s, http.MethodGet, "/favicon.ico", "", "", nil)
+	if resp.status != http.StatusNoContent {
+		t.Fatalf("favicon status = %d, want %d", resp.status, http.StatusNoContent)
+	}
+}
+
+// TestWebUIShipsNoInlineStyle guards the CSP change: inline styles are allowed
+// for extension compatibility, but the console itself must not need them.
+func TestWebUIShipsNoInlineStyle(t *testing.T) {
+	for _, name := range []string{"web/index.html", "web/app.js"} {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if strings.Contains(string(data), "style=\"") || strings.Contains(string(data), ".style.") {
+			t.Errorf("%s uses inline styles; keep CSP meaningful", name)
+		}
+	}
+}

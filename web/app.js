@@ -328,8 +328,9 @@
     $('entity-url').disabled = kind !== 'website';
     for (const id of ['entity-website', 'entity-email', 'entity-password', 'entity-backend', 'entity-api-key']) $(id).disabled = kind !== 'account';
     $('entity-website').required = kind === 'account';
-    $('entity-email').required = kind === 'account' && backendKind() !== 'librechat';
-    $('entity-password').required = kind === 'account' && !entity && backendKind() !== 'librechat';
+    // email/password `required` and visibility are owned by syncBackendFields()
+    // so a hidden field can never stay required (the browser then refuses to
+    // submit with "An invalid form control ... is not focusable").
     $('password-help').textContent = entity ? 'Để trống để giữ mật khẩu hiện tại.' : 'Nhập mật khẩu đăng nhập tài khoản Open WebUI.';
     $('entity-id').value = entity?.id || '';
     $('entity-id').readOnly = Boolean(entity);
@@ -353,16 +354,22 @@
 
   function syncBackendFields() {
     const libre = backendKind() === 'librechat';
+    const isAccount = !$('account-fields').hidden;
     // LibreChat has no email/password pair at all, so hide those inputs instead
-    // of leaving dead optional fields in the form.
+    // of leaving dead optional fields in the form. A hidden *and* required input
+    // makes the browser refuse to submit ("not focusable"), so `required` must
+    // always be cleared together with `hidden`.
     for (const id of ['entity-email', 'entity-password']) {
-      const field = $(id).closest('.field');
-      if (field) field.hidden = libre;
-      $(id).disabled = libre;
-      $(id).required = !libre && (id === 'entity-email' || !editor?.id);
+      const input = $(id);
+      const field = input.closest('.field');
+      const optional = libre || !isAccount;
+      if (field) field.hidden = optional;
+      input.disabled = !isAccount;
+      input.required = id === 'entity-email' ? !libre && isAccount : !libre && isAccount && !editor?.id;
+      if (optional) input.value = '';
     }
     const help = $('password-help');
-    if (help) help.hidden = libre;
+    if (help) help.hidden = libre || !isAccount;
   }
 
   function backendKind() {

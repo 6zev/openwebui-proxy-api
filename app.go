@@ -532,7 +532,11 @@ func serveWeb(w http.ResponseWriter, r *http.Request) bool {
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+	// The console ships no inline styles or event handlers, so style-src can stay
+	// strict. 'unsafe-inline' for styles is limited to the page itself and only
+	// exists so browser extensions (e.g. userscripts that restyle pages with
+	// element.style) cannot break the console; scripts stay locked to 'self'.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
 	return true
 }
@@ -540,6 +544,12 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
+	// Browsers request /favicon.ico on every page; without an answer it falls
+	// through to the API and shows up as a noisy 401 in the console.
+	if r.URL.Path == "/favicon.ico" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if serveWeb(w, r) {
 		return
 	}
