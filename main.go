@@ -65,6 +65,20 @@ func loadDotEnv(path string) error {
 	return scanner.Err()
 }
 
+// modelCacheRefreshInterval returns how often cached model lists are refreshed.
+// Zero (or MODEL_CACHE_SECONDS=0) disables the refresher.
+func modelCacheRefreshInterval() time.Duration {
+	raw := os.Getenv("MODEL_CACHE_REFRESH_SECONDS")
+	if raw == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 // truthy accepts the usual on/true/1 spellings for boolean env flags.
 func truthy(raw string) bool {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -90,6 +104,14 @@ func configFromEnv() (Config, error) {
 	c.ModelPrefix = truthy(os.Getenv("MODEL_PREFIX"))
 	var err error
 	c.Timeout, err = envDuration("UPSTREAM_TIMEOUT_MS", 300000, time.Millisecond)
+	if err != nil {
+		return c, err
+	}
+	c.ProbeTimeout, err = envDuration("PROBE_TIMEOUT_MS", 0, time.Millisecond)
+	if err != nil {
+		return c, err
+	}
+	c.ModelCacheTTL, err = envDuration("MODEL_CACHE_SECONDS", 300, time.Second)
 	if err != nil {
 		return c, err
 	}
@@ -233,6 +255,11 @@ Server configuration is read from environment and .env. See README.md.`)
 	}
 	if !truthy(os.Getenv("HEALTH_CHECK_DISABLED")) {
 		app.healthLoop(healthCtx, interval)
+	}
+	// Keep cached model lists warm so a slow upstream is paid for in the
+	// background instead of inside a client request.
+	if cacheInterval := modelCacheRefreshInterval(); cacheInterval > 0 {
+		app.modelCacheLoop(healthCtx, cacheInterval)
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()

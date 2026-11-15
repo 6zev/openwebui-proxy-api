@@ -173,6 +173,22 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"YOUR_MODEL_ID","messages":[{"role":"user","content":"Giới thiệu ngắn về bạn"}],"stream":true}'
 ```
 
+### Cache danh sách mô hình
+
+Host chậm (một `/api/models` mất ~20s) không nên bắt client chờ mỗi lần.
+
+```dotenv
+MODEL_CACHE_SECONDS=300          # TTL; 0 = tắt cache
+MODEL_CACHE_REFRESH_SECONDS=120  # tự làm mới nền; 0/trống = không tự làm mới
+PROBE_TIMEOUT_MS=60000           # timeout riêng cho health probe; 0 = dùng UPSTREAM_TIMEOUT_MS
+```
+
+- Chỉ cache `/v1/models`; chat/completions **không bao giờ** phát lại từ cache.
+- Cache theo khóa `<website-id>/<account-id>` nên hai web trùng ID acc không lẫn nhau.
+- Response có header `X-Model-Cache: hit|miss` và `X-Model-Cache-Age` (giây) để debug.
+- Upstream lỗi mà còn bản cache trong TTL thì vẫn phục vụ bản đó; hết hạn mới trả lỗi thật.
+- Admin: `GET/POST/DELETE /api/admin/model-cache`; WebUI có thẻ "Cache mô hình" ở Dashboard.
+
 ### Healthcheck theo tài khoản
 
 Proxy tự probe từng acc định kỳ để loại acc chết/đăng nhập hỏng khỏi round-robin trước khi có request thật.

@@ -75,6 +75,16 @@ func sanitizeProbeError(err error) string {
 	return "probe failed"
 }
 
+// probeTimeout bounds a single probe. It deliberately does not shrink the
+// configured timeout to a fixed ceiling: slow-but-healthy upstreams (a model
+// list that takes 20s) would otherwise be marked broken forever.
+func (p *Proxy) probeTimeout() time.Duration {
+	if p.config.ProbeTimeout > 0 {
+		return p.config.ProbeTimeout
+	}
+	return p.config.Timeout
+}
+
 // probe checks one account without touching the shared request path.
 func (p *Proxy) probe(ctx context.Context, a *account) error {
 	start := time.Now()
@@ -89,7 +99,7 @@ func (p *Proxy) probe(ctx context.Context, a *account) error {
 		a.health.record(err, time.Since(start))
 		return err
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, minDuration(p.config.Timeout, 20*time.Second))
+	probeCtx, cancel := context.WithTimeout(ctx, p.probeTimeout())
 	defer cancel()
 	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, a.config.BaseURL+path, nil)
 	if err != nil {

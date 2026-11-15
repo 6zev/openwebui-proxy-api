@@ -179,7 +179,42 @@
       overview.append(row);
     }
     $('api-base').value = location.origin + '/v1';
+    renderModelCache();
     $('persistence-note').textContent = state.persistent ? 'Cấu hình được lưu bền vững.' : 'Cấu hình đang chạy trong bộ nhớ; có thể mất khi khởi động lại.';
+  }
+
+  async function renderModelCache() {
+    const list = $('model-cache-list');
+    if (!list) return;
+    try {
+      const data = await api('/api/admin/model-cache');
+      list.replaceChildren();
+      if (!data || !data.enabled) {
+        const empty = node('div', 'empty');
+        empty.append(node('h3', '', 'Cache đang tắt'), node('p', '', 'Đặt MODEL_CACHE_SECONDS > 0 để bật.'));
+        list.append(empty);
+        return;
+      }
+      const entries = Array.isArray(data.entries) ? data.entries : [];
+      if (!entries.length) {
+        const empty = node('div', 'empty');
+        empty.append(node('h3', '', 'Chưa có mục nào'), node('p', '', 'Cache sẽ đầy sau lần tải mô hình đầu tiên.'));
+        list.append(empty);
+        return;
+      }
+      for (const entry of entries) {
+        const row = node('div', 'site-row');
+        const info = node('div', 'site-detail');
+        info.append(node('strong', '', entry.key), node('small', '', `${entry.models} mô hình · cập nhật ${entry.age_seconds}s trước · TTL ${entry.ttl_seconds}s`));
+        row.append(node('span', 'site-avatar', 'M'), info, badge(entry.expired ? 'Hết hạn' : 'Còn hạn', entry.expired ? 'warn' : 'good'));
+        list.append(row);
+      }
+    } catch (error) {
+      list.replaceChildren();
+      const failed = node('div', 'empty');
+      failed.append(node('h3', '', 'Không đọc được cache'), node('p', '', sanitized(error.message)));
+      list.append(failed);
+    }
   }
 
   function renderWebsites() {
@@ -711,6 +746,14 @@
   $('load-models-button').addEventListener('click', loadModels);
   $('playground-form').addEventListener('submit', sendChat);
   $('stop-chat-button').addEventListener('click', () => { if (chatController) { chatController.abort(); $('stop-chat-button').disabled = true; $('play-status').textContent = 'Đang dừng yêu cầu…'; } });
+  $('model-cache-refresh').addEventListener('click', async () => {
+    try { await api('/api/admin/model-cache', { method: 'POST' }); notice('Đã làm mới cache mô hình.'); await renderModelCache(); }
+    catch (error) { notice(error.message, true); }
+  });
+  $('model-cache-clear').addEventListener('click', async () => {
+    try { await api('/api/admin/model-cache', { method: 'DELETE' }); notice('Đã xoá cache mô hình.'); await renderModelCache(); }
+    catch (error) { notice(error.message, true); }
+  });
   $('copy-api-button').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(location.origin + '/v1'); notice('Đã sao chép API base URL.'); }
     catch { $('api-base').focus(); $('api-base').select(); notice('Chọn URL và nhấn Ctrl+C hoặc ⌘C để sao chép.'); }

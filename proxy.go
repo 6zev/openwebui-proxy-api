@@ -43,7 +43,13 @@ type Config struct {
 	BaseURL, APIKey, DefaultModel, OutboundProxy string
 	ConfigPath                                   string
 	// ModelPrefix enables "<id>/<model>" IDs in model listings.
-	ModelPrefix       bool
+	ModelPrefix bool
+	// ProbeTimeout overrides Timeout for health probes only; zero means the
+	// regular upstream timeout applies.
+	ProbeTimeout time.Duration
+	// ModelCacheTTL keeps successful model listings for this long; zero disables
+	// the cache entirely.
+	ModelCacheTTL     time.Duration
 	Websites          []WebsiteConfig
 	Accounts          []AccountConfig
 	Timeout, Cooldown time.Duration
@@ -66,6 +72,8 @@ type Proxy struct {
 	sites         map[string]WebsiteConfig
 	mu            sync.Mutex
 	nextByWebsite map[string]int
+	// modelCache holds the last successful model list per account key.
+	modelCache *modelCache
 }
 type apiError struct {
 	status     int
@@ -120,6 +128,9 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 	c.Websites = append([]WebsiteConfig{}, c.Websites...)
 	c.Accounts = append([]AccountConfig{}, c.Accounts...)
 	p := &Proxy{config: c, key: sha256.Sum256([]byte(c.APIKey)), sites: make(map[string]WebsiteConfig), nextByWebsite: make(map[string]int)}
+	if c.ModelCacheTTL > 0 {
+		p.modelCache = newModelCache(c.ModelCacheTTL)
+	}
 	for _, s := range c.Websites {
 		if !validConfigID(s.ID) {
 			return nil, errors.New("website IDs must use 1-64 letters, digits, dots, hyphens or underscores")
@@ -599,6 +610,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), p.config.Timeout)
 	defer cancel()
+	// Serve a fresh cached model list before touching (possibly very slow)
+	// upstreams. Only /v1/models is cached; chat is never replayed from cache.
+	if models && p.modelCache != nil {
+		if cached, fetchedAt, ok := p.modelCache.get(modelCacheKeyFor(candidates)); ok {
+			w.Header().Set("X-Model-Cache", "hit")
+			w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
+			writeModelList(w, cached, p.modelPrefixFor(r, candidates))
+			return
+		}
+	}
 	// Open WebUI paths; LibreChat accounts translate these per account because
 	// the two backends expose different route families for the same surface.
 	path, method := "/api/chat/completions", http.MethodPost
@@ -683,8 +704,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, &apiError{502, "Unexpected model-list response", 0})
 			return
 		}
-		out := make([]map[string]any, 0, len(items))
-		prefix := selectedPrefix
+		cached := make([]cachedModel, 0, len(items))
 		for _, m := range items {
 			if m.ID == "" {
 				continue
@@ -692,15 +712,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if m.OwnedBy == "" {
 				m.OwnedBy = "open-webui"
 			}
-			id := m.ID
-			if prefix != "" {
-				// Expose "<id>/<model>" so a plain OpenAI client can route back to
-				// the same account/website without custom headers.
-				id = prefix + "/" + m.ID
-			}
-			out = append(out, map[string]any{"id": id, "object": "model", "created": m.Created, "owned_by": m.OwnedBy})
+			cached = append(cached, cachedModel{ID: m.ID, Created: m.Created, OwnedBy: m.OwnedBy})
 		}
-		writeJSON(w, 200, map[string]any{"object": "list", "data": out})
+		if p.modelCache != nil {
+			p.modelCache.put(modelCacheKeyFor(candidates), cached)
+			w.Header().Set("X-Model-Cache", "miss")
+		}
+		writeModelList(w, cached, selectedPrefix)
 		return
 	}
 	contentType := response.Header.Get("Content-Type")

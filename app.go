@@ -596,6 +596,8 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/admin/")
 	switch {
+	case path == "model-cache" && (r.Method == http.MethodGet || r.Method == http.MethodPost || r.Method == http.MethodDelete):
+		a.modelCacheHandler(w, r)
 	case path == "health" && (r.Method == http.MethodGet || r.Method == http.MethodPost):
 		a.healthHandler(w, r)
 	case path == "state" && r.Method == http.MethodGet:
@@ -629,4 +631,51 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, &apiError{404, "Endpoint not found", 0})
 	}
+}
+
+// modelCacheLoop refreshes cached model lists on an interval until ctx ends.
+func (a *Application) modelCacheLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				proxy, _, _ := a.snapshot()
+				proxy.refreshModelCache(ctx)
+			}
+		}
+	}()
+}
+
+// modelCacheHandler exposes and clears cached model lists for the admin UI/API.
+func (a *Application) modelCacheHandler(w http.ResponseWriter, r *http.Request) {
+	proxy, _, _ := a.snapshot()
+	if proxy.modelCache == nil {
+		writeJSON(w, 200, map[string]any{"enabled": false, "entries": []any{}})
+		return
+	}
+	if r.Method == http.MethodPost {
+		proxy.refreshModelCache(r.Context())
+	} else if r.Method == http.MethodDelete {
+		for _, key := range proxy.modelCache.keys() {
+			proxy.modelCache.drop(key)
+		}
+	}
+	entries := make([]map[string]any, 0, len(proxy.modelCache.keys()))
+	for _, key := range proxy.modelCache.keys() {
+		if entry, ok := proxy.modelCache.describe(key); ok {
+			entries = append(entries, entry)
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"enabled": true,
+		"ttl":     int(proxy.modelCache.ttl / time.Second),
+		"entries": entries,
+	})
 }
