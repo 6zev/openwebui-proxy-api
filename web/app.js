@@ -769,6 +769,15 @@
     try { await api('/api/admin/model-cache', { method: 'DELETE' }); notice('Đã xoá cache mô hình.'); await renderModelCache(); }
     catch (error) { notice(error.message, true); }
   });
+  $('logs-refresh').addEventListener('click', async () => {
+    const output = $('logs-output');
+    try {
+      const result = await api('/api/admin/logs');
+      const lines = Array.isArray(result.lines) ? result.lines : [];
+      output.textContent = lines.length ? lines.join('\n') : 'Không có log. Đặt DEBUG_LOG=1 rồi khởi động lại proxy để bật chẩn đoán chi tiết.';
+      output.scrollTop = output.scrollHeight;
+    } catch (error) { output.textContent = `Không tải được log: ${sanitized(error.message)}`; }
+  });
   $('copy-api-button').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(location.origin + '/v1'); notice('Đã sao chép API base URL.'); }
     catch { $('api-base').focus(); $('api-base').select(); notice('Chọn URL và nhấn Ctrl+C hoặc ⌘C để sao chép.'); }

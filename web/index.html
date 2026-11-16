@@ -139,6 +139,18 @@ X-Account-ID: &lt;account_id&gt;  <span class="code-comment"># tuỳ chọn</spa
             </div>
             <div id="model-cache-list" class="site-list"></div>
           </article>
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <h3>Log chẩn đoán</h3>
+                <p class="card-sub">Bật <code>DEBUG_LOG=1</code> rồi khởi động lại để thấy từng lời gọi upstream và đoạn thân lỗi (không có khoá/mật khẩu).</p>
+              </div>
+              <div class="row-actions">
+                <button id="logs-refresh" class="btn btn-soft" type="button">Làm mới</button>
+              </div>
+            </div>
+            <pre id="logs-output" class="logs" aria-live="polite">Bấm “Làm mới” để tải log.</pre>
+          </article>
         </div>
         <div class="foot-note">
           <span id="persistence-note">Đang tải trạng thái lưu trữ.</span>

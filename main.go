@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-var Version = "v0.10.0"
+var Version = "v0.11.0"
 
 // loadDotEnv intentionally supports single-line KEY=value, quoted strings and
 // comment lines only. No shell evaluation or variable interpolation is performed.
@@ -102,6 +102,7 @@ func envDuration(key string, def int64, unit time.Duration) (time.Duration, erro
 func configFromEnv() (Config, error) {
 	c := Config{BaseURL: os.Getenv("OPENWEBUI_URL"), APIKey: os.Getenv("PROXY_API_KEY"), DefaultModel: os.Getenv("DEFAULT_MODEL"), OutboundProxy: os.Getenv("OUTBOUND_PROXY")}
 	c.ModelPrefix = truthy(os.Getenv("MODEL_PREFIX"))
+	c.DebugLog = truthy(os.Getenv("DEBUG_LOG"))
 	var err error
 	c.Timeout, err = envDuration("UPSTREAM_TIMEOUT_MS", 300000, time.Millisecond)
 	if err != nil {
@@ -264,6 +265,12 @@ Server configuration is read from environment and .env. See README.md.`)
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	log.Printf("Open WebUI proxy %s listening on %s (%d accounts)", Version, listener.Addr(), len(cfg.Accounts))
+	// Mirror the standard logger into the admin console ring buffer. Probe and
+	// rotation lines are useful there too, so it is always attached.
+	log.SetOutput(io.MultiWriter(os.Stderr, debugLogs))
+	if cfg.DebugLog {
+		log.Printf("debug logging enabled: one line per upstream call plus bounded error-body excerpts; credentials are never logged")
+	}
 	select {
 	case err := <-done:
 		if errors.Is(err, http.ErrServerClosed) {

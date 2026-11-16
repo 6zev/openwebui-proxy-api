@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +50,10 @@ type Config struct {
 	ConfigPath                                   string
 	// ModelPrefix enables "<id>/<model>" IDs in model listings.
 	ModelPrefix bool
+	// DebugLog logs one line per routed request plus a bounded excerpt of an
+	// upstream error body. It never logs credentials: auth headers and the
+	// proxy keys are excluded by construction.
+	DebugLog bool
 	// ProbeTimeout overrides Timeout for health probes only; zero means the
 	// regular upstream timeout applies.
 	ProbeTimeout time.Duration
@@ -265,6 +271,26 @@ func writeError(w http.ResponseWriter, err error) {
 	}
 	writeJSON(w, e.status, map[string]any{"error": map[string]any{"message": e.message, "type": typ, "code": strconv.Itoa(e.status)}})
 }
+
+// debugf logs only when DEBUG_LOG is enabled, so a normal deployment stays quiet.
+func (p *Proxy) debugf(format string, args ...any) {
+	if p.config.DebugLog {
+		log.Printf(format, args...)
+	}
+}
+
+// debugBody returns a bounded, single-line excerpt of an upstream error body for
+// the debug log. The body is upstream-controlled, so control characters are
+// stripped and the length is capped.
+func debugBody(raw []byte) string {
+	const limit = 1500
+	text := strings.Join(strings.Fields(string(raw)), " ")
+	if len(text) > limit {
+		text = text[:limit] + "…"
+	}
+	return text
+}
+
 func (p *Proxy) cooldown(a *account, d time.Duration) {
 	a.cooldownMu.Lock()
 	defer a.cooldownMu.Unlock()
@@ -516,13 +542,16 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 				req.Header.Add(name, value)
 			}
 		}
+		started := time.Now()
 		resp, err := a.client.Do(req)
 		if err != nil {
+			p.debugf("debug: %s %s account=%s website=%s transport-error=%v elapsed=%s", method, path, a.config.ID, a.config.WebsiteID, err, time.Since(started))
 			if ctx.Err() == nil {
 				p.cooldown(a, p.config.Cooldown)
 			}
 			return nil, err, false
 		}
+		p.debugf("debug: %s %s account=%s website=%s status=%d elapsed=%s", method, path, a.config.ID, a.config.WebsiteID, resp.StatusCode, time.Since(started))
 		if resp.StatusCode == 401 && attempt == 0 && !staticKey {
 			resp.Body.Close()
 			a.mu.Lock()
@@ -542,6 +571,11 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return resp, nil, false
+		}
+		var errorExcerpt []byte
+		if p.config.DebugLog {
+			errorExcerpt, _ = io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+			p.debugf("debug: upstream error body %s %s account=%s -> %s", method, path, a.config.ID, debugBody(errorExcerpt))
 		}
 		resp.Body.Close()
 		e := &apiError{status: resp.StatusCode, message: fmt.Sprintf("%s returned HTTP %d", backendLabel(a.config.Backend), resp.StatusCode)}
@@ -645,6 +679,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if passThrough {
 		body = applyModelPrefix(p, r, body)
+		p.debugSurfaceBody(r, body, surfaceTarget)
 		p.forwardBody(w, r, body, surfaceTarget)
 		return
 	}
@@ -830,6 +865,44 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+	}
+}
+
+// responsesUnsupported lists OpenAI Responses API fields that Open WebUI's
+// /openai/responses handler is known to reject. Sending one of them makes the
+// upstream answer 400 without saying which field caused it, which is the most
+// common cause of an editor integration failing with "Open WebUI returned HTTP
+// 400". The proxy still forwards the payload untouched; this is diagnostics.
+var responsesUnsupported = []string{"reasoning", "include", "parallel_tool_calls", "truncation", "store", "background", "metadata", "max_tool_calls", "previous_response_id", "prompt_cache_key", "service_tier", "top_logprobs", "tool_choice"}
+
+// debugSurfaceBody logs the shape of a passthrough body when debugging is on,
+// and warns about Responses fields the upstream is likely to reject.
+func (p *Proxy) debugSurfaceBody(r *http.Request, body []byte, target string) {
+	if !p.config.DebugLog {
+		return
+	}
+	var input map[string]json.RawMessage
+	if len(body) == 0 || json.Unmarshal(body, &input) != nil {
+		p.debugf("debug: %s %s upstream=%s body=%dB (not JSON)", r.Method, r.URL.Path, target, len(body))
+		return
+	}
+	keys := make([]string, 0, len(input))
+	suspicious := make([]string, 0, 4)
+	for key := range input {
+		keys = append(keys, key)
+		for _, name := range responsesUnsupported {
+			if key == name {
+				suspicious = append(suspicious, key)
+			}
+		}
+	}
+	sort.Strings(keys)
+	sort.Strings(suspicious)
+	var model string
+	_ = json.Unmarshal(input["model"], &model)
+	p.debugf("debug: %s %s upstream=%s model=%q body=%dB keys=%v", r.Method, r.URL.Path, target, model, len(body), keys)
+	if len(suspicious) > 0 {
+		p.debugf("debug: WARNING %s carries %v; Open WebUI's /openai/responses rejects these with 400. Remove them in the client if the call fails.", r.URL.Path, suspicious)
 	}
 }
 

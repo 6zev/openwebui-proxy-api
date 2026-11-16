@@ -96,6 +96,39 @@ func redactedProxy(raw string) string {
 	return u.String()
 }
 
+// logBuffer keeps the most recent debug lines for the admin console, so an
+// operator can see why an upstream rejected a request without shell access. It
+// holds no credentials: the router never logs headers or keys.
+type logBuffer struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+const logBufferSize = 300
+
+// debugLogs is the process-wide ring buffer served by /api/admin/logs.
+var debugLogs = &logBuffer{}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// Split on newlines so one record is one log line.
+	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+		b.lines = append(b.lines, line)
+	}
+	if over := len(b.lines) - logBufferSize; over > 0 {
+		b.lines = append([]string(nil), b.lines[over:]...)
+	}
+	return len(p), nil
+}
+
+func (b *logBuffer) snapshot() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// Return an empty slice rather than nil so the API always answers [].
+	return append([]string{}, b.lines...)
+}
+
 // healthHandler exposes the latest probe results to the admin WebUI/API.
 func (a *Application) healthHandler(w http.ResponseWriter, r *http.Request) {
 	proxy, _, _ := a.snapshot()
@@ -103,6 +136,12 @@ func (a *Application) healthHandler(w http.ResponseWriter, r *http.Request) {
 		proxy.runHealthProbes(r.Context(), true)
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": proxy.healthReport()})
+}
+
+// logsHandler returns recent debug lines. Logging is always mirrored into this
+// ring buffer; it only fills up when DEBUG_LOG is enabled.
+func (a *Application) logsHandler(w http.ResponseWriter) {
+	writeJSON(w, 200, map[string]any{"lines": debugLogs.snapshot()})
 }
 
 func (a *Application) state(w http.ResponseWriter) {
@@ -621,6 +660,8 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.modelCacheHandler(w, r)
 	case path == "health" && (r.Method == http.MethodGet || r.Method == http.MethodPost):
 		a.healthHandler(w, r)
+	case path == "logs" && r.Method == http.MethodGet:
+		a.logsHandler(w)
 	case path == "state" && r.Method == http.MethodGet:
 		a.state(w)
 	case path == "models" && r.Method == http.MethodGet:

@@ -182,6 +182,7 @@ Host chậm (một `/api/models` mất ~20s) không nên bắt client chờ mỗ
 MODEL_CACHE_SECONDS=300          # TTL; 0 = tắt cache
 MODEL_CACHE_REFRESH_SECONDS=120  # tự làm mới nền; 0/trống = không tự làm mới
 PROBE_TIMEOUT_MS=60000           # timeout riêng cho health probe; 0 = dùng UPSTREAM_TIMEOUT_MS
+DEBUG_LOG=1                      # log chẩn đoán: mỗi lời gọi upstream + đoạn thân lỗi (không log khoá/mật khẩu); 0 = tắt
 ```
 
 - Chỉ cache `/v1/models`; chat/completions **không bao giờ** phát lại từ cache.
@@ -189,6 +190,25 @@ PROBE_TIMEOUT_MS=60000           # timeout riêng cho health probe; 0 = dùng UP
 - Response có header `X-Model-Cache: hit|miss` và `X-Model-Cache-Age` (giây) để debug.
 - Upstream lỗi mà còn bản cache trong TTL thì vẫn phục vụ bản đó; hết hạn mới trả lỗi thật.
 - Admin: `GET/POST/DELETE /api/admin/model-cache`; WebUI có thẻ "Cache mô hình" ở Dashboard.
+
+### Log chẩn đoán (`DEBUG_LOG`)
+
+Bật `DEBUG_LOG=1` rồi khởi động lại. Log đi ra stderr **và** vào vòng đệm 300 dòng xem được ở Dashboard → thẻ “Log chẩn đoán” (API `GET /api/admin/logs`), không cần shell trên host.
+
+- Mỗi lời gọi upstream một dòng: `debug: POST /api/chat/completions account=… website=… status=400 elapsed=…`.
+- Khi upstream trả lỗi, in thêm **đoạn thân lỗi** (tối đa 1.5 KB, đã nén khoảng trắng) — chính là chỗ Open WebUI nói rõ vì sao trả `400`.
+- Passthrough (Responses, tools, MCP, embeddings…) in ra danh sách key của body và **cảnh báo** khi gặp field mà `/openai/responses` của Open WebUI hay từ chối: `reasoning`, `include`, `store`, `metadata`, `parallel_tool_calls`, `previous_response_id`, `truncation`, `background`, `top_logprobs`, `tool_choice`, `service_tier`, `max_tool_calls`, `prompt_cache_key`.
+- Không bao giờ log header `Authorization`, khoá proxy hay mật khẩu; body lỗi được lọc ký tự điều khiển trước khi ghi.
+- Tắt mặc định: khi `DEBUG_LOG` không bật, proxy chỉ log lúc khởi động và lỗi nghiêm trọng.
+
+### Gặp `Open WebUI returned HTTP 400` từ editor (Cline/Roo/Copilot…)
+
+Triệu chứng: client báo `502 … Open WebUI returned HTTP 400` khi gọi Responses API, có thể kèm “retried 5 times”. Nguyên nhân thường gặp **không phải** proxy: client gửi field mà bản Open WebUI của bạn không nhận, và upstream chỉ trả `400` trống.
+
+1. Bật `DEBUG_LOG=1`, khởi động lại, tái hiện lỗi, rồi mở Dashboard → “Log chẩn đoán”. Dòng `WARNING /v1/responses carries [...]` chỉ đúng field gây lỗi, dòng `upstream error body …` cho biết upstream nói gì.
+2. Field hay bị từ chối: `reasoning`, `include`, `store`, `metadata`, `parallel_tool_calls`, `previous_response_id`, `truncation`, `background`, `top_logprobs`, `tool_choice`, `service_tier`, `max_tool_calls`, `prompt_cache_key`. Bỏ tính năng tương ứng ở phía client (ví dụ tắt “reasoning effort” / “reasoning summary”).
+3. Nếu client dùng **giao thức Responses** (`/v1/responses`): proxy chuyển tới `/openai/responses` của Open WebUI. Kiểm bản upstream có mount router đó không (`curl -s -o /dev/null -w '%{http_code}' $BASE/openai/responses` — `405` là có route, `404` là không). Không có thì chuyển client sang **Chat Completions** (`/v1` + model thường) là chắc ăn nhất.
+4. Tools/MCP: proxy chỉ chuyển tiếp, quyền thực thi và cấu hình MCP nằm ở upstream — MCP chưa bật thì tool call sẽ lỗi ở đó, không phải ở proxy.
 
 ### Healthcheck theo tài khoản
 
