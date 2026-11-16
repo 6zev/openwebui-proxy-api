@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -76,7 +77,10 @@ func TestModelCacheDisabled(t *testing.T) {
 	}
 }
 
-func TestModelCacheExpires(t *testing.T) {
+// An expired entry is served immediately as "stale" while a background refresh
+// runs, so a slow upstream is never on the caller's clock. The next request sees
+// the refreshed list as a hit.
+func TestModelCacheServesStaleWhileRefreshing(t *testing.T) {
 	var hits atomic.Int32
 	u := slowModelsUpstream(t, 0, &hits)
 	cfg := proxyTestConfig(u, "acc")
@@ -86,11 +90,78 @@ func TestModelCacheExpires(t *testing.T) {
 	time.Sleep(90 * time.Millisecond)
 	resp := proxyTestRequest(t, s, http.MethodGet, "/v1/models", "", testProxyKey, "")
 	requireProxyStatus(t, resp, 200)
-	if resp.header.Get("X-Model-Cache") != "miss" {
-		t.Errorf("expired entry reported %q, want miss", resp.header.Get("X-Model-Cache"))
+	if got := resp.header.Get("X-Model-Cache"); got != "stale" {
+		t.Errorf("expired entry reported %q, want stale", got)
 	}
-	if hits.Load() != 2 {
-		t.Errorf("upstream hits = %d, want 2", hits.Load())
+	// Background refresh must land without another client request.
+	deadline := time.Now().Add(2 * time.Second)
+	for hits.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if hits.Load() < 2 {
+		t.Fatalf("expired entry was never refreshed; upstream hits = %d", hits.Load())
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		resp = proxyTestRequest(t, s, http.MethodGet, "/v1/models", "", testProxyKey, "")
+		if resp.header.Get("X-Model-Cache") == "hit" || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := resp.header.Get("X-Model-Cache"); got != "hit" {
+		t.Errorf("refreshed entry reported %q, want hit", got)
+	}
+}
+
+// Refresher default: unset MODEL_CACHE_REFRESH_SECONDS must not disable it.
+func TestModelCacheRefreshIntervalDefaultsToHalfTTL(t *testing.T) {
+	t.Setenv("MODEL_CACHE_REFRESH_SECONDS", "")
+	if got := modelCacheRefreshInterval(300 * time.Second); got != 150*time.Second {
+		t.Errorf("default interval = %s, want 150s", got)
+	}
+	t.Setenv("MODEL_CACHE_REFRESH_SECONDS", "0")
+	if got := modelCacheRefreshInterval(300 * time.Second); got != 0 {
+		t.Errorf("explicit 0 should disable, got %s", got)
+	}
+	t.Setenv("MODEL_CACHE_REFRESH_SECONDS", "20")
+	if got := modelCacheRefreshInterval(300 * time.Second); got != 20*time.Second {
+		t.Errorf("configured interval = %s, want 20s", got)
+	}
+	t.Setenv("MODEL_CACHE_REFRESH_SECONDS", "")
+	if got := modelCacheRefreshInterval(500 * time.Millisecond); got != time.Second {
+		t.Errorf("tiny ttl interval = %s, want 1s floor", got)
+	}
+}
+
+// When every account fails, a previously served list is better than an error.
+func TestModelCacheServesStaleOnUpstreamError(t *testing.T) {
+	var broken atomic.Bool
+	u := newProxyTestUpstream(t)
+	u.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auths/signin" {
+			_, _ = w.Write([]byte(`{"token":"t"}`))
+			return
+		}
+		if broken.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"m","created":1,"owned_by":"x"}]}`))
+	})
+	cfg := proxyTestConfig(u, "acc")
+	cfg.ModelCacheTTL = 50 * time.Millisecond
+	s := newProxyTestServer(t, cfg)
+	requireProxyStatus(t, proxyTestRequest(t, s, http.MethodGet, "/v1/models", "", testProxyKey, ""), 200)
+	broken.Store(true)
+	time.Sleep(90 * time.Millisecond)
+	resp := proxyTestRequest(t, s, http.MethodGet, "/v1/models", "", testProxyKey, "")
+	requireProxyStatus(t, resp, 200)
+	if got := resp.header.Get("X-Model-Cache"); got != "stale" {
+		t.Errorf("cache header = %q, want stale", got)
+	}
+	if !strings.Contains(resp.body, `"m"`) {
+		t.Errorf("stale list missing models: %s", resp.body)
 	}
 }
 

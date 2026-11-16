@@ -732,12 +732,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Serve a fresh cached model list before touching (possibly very slow)
 	// upstreams. Only /v1/models is cached; chat is never replayed from cache.
 	if models && p.modelCache != nil {
-		if cached, fetchedAt, ok := p.modelCache.get(modelCacheKeyFor(candidates)); ok {
+		key := modelCacheKeyFor(candidates)
+		if cached, fetchedAt, ok := p.modelCache.get(key); ok {
 			w.Header().Set("X-Model-Cache", "hit")
 			w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
 			writeModelList(w, cached, p.modelPrefixFor(r, candidates))
 			return
 		}
+		// Expired entry: serve it immediately and refresh behind the caller, so a
+		// slow upstream is never on the request path. The caller sees
+		// X-Model-Cache: stale and the age, and the next request gets a hit.
+		if stale, fetchedAt, ok := p.modelCache.peek(key); ok {
+			w.Header().Set("X-Model-Cache", "stale")
+			w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
+			writeModelList(w, stale, p.modelPrefixFor(r, candidates))
+			if a := candidates[0]; a != nil {
+				go p.refreshModelEntry(context.WithoutCancel(r.Context()), a)
+			}
+			return
+		}
+		w.Header().Set("X-Model-Cache", "miss")
 	}
 	// Open WebUI paths; LibreChat accounts translate these per account because
 	// the two backends expose different route families for the same surface.
@@ -794,6 +808,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
+		if models && p.modelCache != nil {
+			if stale, fetchedAt, ok := p.modelCache.peek(modelCacheKeyFor(candidates)); ok {
+				// Every account failed, but a previously served list is better
+				// than an error: the client can still pick a model and retry.
+				w.Header().Set("X-Model-Cache", "stale-error")
+				w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
+				w.Header().Set("X-Cache-Error", "upstream-failed")
+				writeModelList(w, stale, p.modelPrefixFor(r, candidates))
+				return
+			}
+		}
 		writeError(w, err)
 		return
 	}

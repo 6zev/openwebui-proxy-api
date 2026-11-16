@@ -19,8 +19,11 @@ type modelCacheEntry struct {
 	mu        sync.Mutex
 	models    []cachedModel
 	fetchedAt time.Time
-	// staleAt is when the entry stops being served while a refresh runs.
+	// expiresAt is when the entry stops being served fresh.
 	expiresAt time.Time
+	// refreshing marks an in-flight background fetch so a burst of callers
+	// triggers one upstream call instead of one per request.
+	refreshing bool
 }
 
 type cachedModel struct {
@@ -62,6 +65,31 @@ func (c *modelCache) get(key string) ([]cachedModel, time.Time, bool) {
 		return nil, time.Time{}, false
 	}
 	return entry.models, entry.fetchedAt, true
+}
+
+// beginRefresh claims the right to fetch this key in the background. It reports
+// false when a refresh is already running, so bursts collapse into one fetch.
+func (c *modelCache) beginRefresh(key string) (*modelCacheEntry, bool) {
+	if c == nil {
+		return nil, false
+	}
+	entry := c.entry(key)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.refreshing {
+		return nil, false
+	}
+	entry.refreshing = true
+	return entry, true
+}
+
+func (c *modelCache) endRefresh(entry *modelCacheEntry) {
+	if entry == nil {
+		return
+	}
+	entry.mu.Lock()
+	entry.refreshing = false
+	entry.mu.Unlock()
 }
 
 // peek returns a cached list even when expired, for stale-while-error fallback.
@@ -131,27 +159,52 @@ func (c *modelCache) describe(key string) (map[string]any, bool) {
 		"age_seconds": int(age / time.Second),
 		"ttl_seconds": int(c.ttl / time.Second),
 		"expired":     time.Now().After(entry.expiresAt),
+		"refreshing":  entry.refreshing,
 	}, true
 }
 
-// refreshAll re-fetches every cached key in the background. It is what keeps a
-// slow upstream's list warm without blocking callers.
+// refreshModelCache re-fetches every cached key in the background. It is what
+// keeps a slow upstream's list warm without blocking callers.
 func (p *Proxy) refreshModelCache(ctx context.Context) {
 	if p.modelCache == nil {
 		return
 	}
 	for _, key := range p.modelCache.keys() {
-		websiteID, accountID := splitAccountKey(key)
-		for _, a := range p.accounts {
-			if a.config.ID != accountID || (websiteID != "" && a.config.WebsiteID != websiteID) {
-				continue
-			}
-			if models, err := p.fetchModelList(ctx, a); err == nil {
-				p.modelCache.put(key, models)
-			}
-			break
+		a := p.accountByKey(key)
+		if a == nil || a.config.Disabled {
+			continue
+		}
+		p.refreshModelEntry(ctx, a)
+	}
+}
+
+// refreshModelEntry fetches one account's list and stores it. The per-account
+// timeout is applied here, so a sweep over several websites does not share one
+// deadline and quietly skip the slow ones at the end.
+func (p *Proxy) refreshModelEntry(ctx context.Context, a *account) {
+	entry, claimed := p.modelCache.beginRefresh(accountKey(a.config.WebsiteID, a.config.ID))
+	if !claimed {
+		return
+	}
+	defer p.modelCache.endRefresh(entry)
+	fetchCtx, cancel := context.WithTimeout(ctx, p.probeTimeoutFor(a))
+	defer cancel()
+	if models, err := p.fetchModelList(fetchCtx, a); err == nil {
+		p.modelCache.put(accountKey(a.config.WebsiteID, a.config.ID), models)
+	} else {
+		p.debugf("debug: model-cache refresh failed account=%s website=%s err=%v", a.config.ID, a.config.WebsiteID, err)
+	}
+}
+
+// accountByKey resolves a "<website-id>/<account-id>" cache key.
+func (p *Proxy) accountByKey(key string) *account {
+	websiteID, accountID := splitAccountKey(key)
+	for _, a := range p.accounts {
+		if a.config.ID == accountID && (websiteID == "" || a.config.WebsiteID == websiteID) {
+			return a
 		}
 	}
+	return nil
 }
 
 // fetchModelList performs the upstream /models call and parses the list.

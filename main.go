@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-var Version = "v0.11.0"
+var Version = "v0.12.0"
 
 // loadDotEnv intentionally supports single-line KEY=value, quoted strings and
 // comment lines only. No shell evaluation or variable interpolation is performed.
@@ -66,11 +66,16 @@ func loadDotEnv(path string) error {
 }
 
 // modelCacheRefreshInterval returns how often cached model lists are refreshed.
-// Zero (or MODEL_CACHE_SECONDS=0) disables the refresher.
-func modelCacheRefreshInterval() time.Duration {
-	raw := os.Getenv("MODEL_CACHE_REFRESH_SECONDS")
+// Unset means "half the TTL", so an expiring entry is refreshed before callers
+// can see it go stale. A set value of 0 disables the refresher explicitly.
+func modelCacheRefreshInterval(ttl time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv("MODEL_CACHE_REFRESH_SECONDS"))
 	if raw == "" {
-		return 0
+		interval := ttl / 2
+		if interval < time.Second {
+			interval = time.Second
+		}
+		return interval
 	}
 	seconds, err := strconv.Atoi(raw)
 	if err != nil || seconds <= 0 {
@@ -259,8 +264,14 @@ Server configuration is read from environment and .env. See README.md.`)
 	}
 	// Keep cached model lists warm so a slow upstream is paid for in the
 	// background instead of inside a client request.
-	if cacheInterval := modelCacheRefreshInterval(); cacheInterval > 0 {
-		app.modelCacheLoop(healthCtx, cacheInterval)
+	// Default refresh interval is derived from the TTL: a cache that never
+	// refreshes would keep serving a stale list forever. MODEL_CACHE_REFRESH_SECONDS=0
+	// disables the refresher explicitly; MODEL_CACHE_SECONDS=0 disables the cache.
+	if cfg.ModelCacheTTL > 0 {
+		if cacheInterval := modelCacheRefreshInterval(cfg.ModelCacheTTL); cacheInterval > 0 {
+			app.modelCacheLoop(healthCtx, cacheInterval)
+			log.Printf("model cache: ttl %s, refresh every %s", cfg.ModelCacheTTL, cacheInterval)
+		}
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()

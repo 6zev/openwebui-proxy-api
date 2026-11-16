@@ -180,15 +180,18 @@ Host chậm (một `/api/models` mất ~20s) không nên bắt client chờ mỗ
 
 ```dotenv
 MODEL_CACHE_SECONDS=300          # TTL; 0 = tắt cache
-MODEL_CACHE_REFRESH_SECONDS=120  # tự làm mới nền; 0/trống = không tự làm mới
+MODEL_CACHE_REFRESH_SECONDS      # chu kỳ làm mới nền; trống = TTL/2 (khuyến nghị); 0 = tắt hẳn
 PROBE_TIMEOUT_MS=60000           # timeout riêng cho health probe; 0 = dùng UPSTREAM_TIMEOUT_MS
 DEBUG_LOG=1                      # log chẩn đoán: mỗi lời gọi upstream + đoạn thân lỗi (không log khoá/mật khẩu); 0 = tắt
 ```
 
 - Chỉ cache `/v1/models`; chat/completions **không bao giờ** phát lại từ cache.
 - Cache theo khóa `<website-id>/<account-id>` nên hai web trùng ID acc không lẫn nhau.
-- Response có header `X-Model-Cache: hit|miss` và `X-Model-Cache-Age` (giây) để debug.
-- Upstream lỗi mà còn bản cache trong TTL thì vẫn phục vụ bản đó; hết hạn mới trả lỗi thật.
+- Response có header `X-Model-Cache: hit|stale|stale-error|miss` và `X-Model-Cache-Age` (giây) để debug.
+- **Hết TTL không bị chặn**: bản cũ được trả ngay với `stale` kèm cờ `X-Model-Cache-Age`, đồng thời một lần fetch nền chạy song song (một fetch cho mỗi acc, các request dồn dập không nhân lên). Request sau nhận `hit`.
+- **Upstream lỗi**: danh sách cũ vẫn được phục vụ (`stale-error` + `X-Cache-Error: upstream-failed`) thay vì trả lỗi cho client.
+- Làm mới nền mặc định **bật** (chu kỳ = TTL/2, sàn 1 giây) — trước đây trống nghĩa là tắt, khiến cache phục vụ danh sách cũ vô hạn.
+- Mỗi acc được làm mới bằng ngân sách timeout riêng của acc đó, nên một host chậm không làm cả vòng quét bị cắt.
 - Admin: `GET/POST/DELETE /api/admin/model-cache`; WebUI có thẻ "Cache mô hình" ở Dashboard.
 
 ### Log chẩn đoán (`DEBUG_LOG`)
