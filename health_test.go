@@ -82,14 +82,14 @@ func TestHealthProbesRecoverAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failures := p.runHealthProbes(context.Background()); failures != 1 {
+	if failures := p.runHealthProbes(context.Background(), false); failures != 1 {
 		t.Fatalf("failures = %d, want 1", failures)
 	}
 	if status, _, _, _ := p.accounts[0].health.snapshot(); status != healthFailed {
 		t.Fatalf("status = %s, want failed", status)
 	}
 	fail.Store(false)
-	if failures := p.runHealthProbes(context.Background()); failures != 0 {
+	if failures := p.runHealthProbes(context.Background(), false); failures != 0 {
 		t.Fatalf("recovery failures = %d, want 0", failures)
 	}
 	if status, _, _, _ := p.accounts[0].health.snapshot(); status != healthOK {
@@ -103,7 +103,7 @@ func TestHealthEndpointShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.runHealthProbes(context.Background())
+	p.runHealthProbes(context.Background(), false)
 	server := newProxyTestServer(t, proxyTestConfig(u, "alpha"))
 	// Probes ran against a different instance; just assert the JSON contract.
 	_ = p
@@ -141,5 +141,84 @@ func TestHealthSanitizesErrors(t *testing.T) {
 	err := sanitizeProbeError(io.ErrUnexpectedEOF)
 	if strings.Contains(err, "token") || strings.Contains(err, "Bearer") {
 		t.Errorf("unsafe sanitized error: %q", err)
+	}
+}
+
+func TestHeaderSanity(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1:1/x", nil)
+	req.Header.Set("Authorization", "alpha-token-1")
+	t.Logf("plain=%q", req.Header.Get("Authorization"))
+}
+
+// A transient failure must not freeze an account as unavailable forever: an
+// operator-triggered check has to reach the upstream again, clear the stale
+// verdict and let routing use the account immediately afterwards.
+func TestOperatorCheckClearsStaleVerdict(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	var broken atomic.Bool
+	broken.Store(true)
+	u.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auths/signin" {
+			if broken.Load() {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			_, _ = io.WriteString(w, `{"token":"alpha-token-1"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"m1"}]}`)
+	})
+	cfg := proxyTestConfig(u, "alpha")
+	cfg.Cooldown = time.Hour
+	p, err := NewProxy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := p.accounts[0]
+	if err := p.probe(context.Background(), a, false); err == nil {
+		t.Fatal("expected the failing signin to be reported")
+	}
+	// The cached block must short-circuit normal selection, but an explicit
+	// check must not repeat it.
+	if _, err := p.candidatesFor("alpha", ""); err == nil {
+		t.Fatal("blocked account should not be selectable from cached state")
+	} else if !isStoredErr(err) {
+		t.Fatalf("selection error should be a stored verdict, got %v", err)
+	}
+	broken.Store(false)
+	if err := p.probe(context.Background(), a, true); err != nil {
+		t.Fatalf("operator check should reach the recovered upstream: %v", err)
+	}
+	if status, _, _, _ := a.health.snapshot(); status != healthOK {
+		t.Errorf("health status = %s, want ok", status)
+	}
+	if _, err := p.candidatesFor("alpha", ""); err != nil {
+		t.Errorf("recovered account is still blocked: %v", err)
+	}
+}
+
+// The health report has to explain an account that is blocked only by its login
+// cooldown, otherwise the UI shows an unavailable account with no reason.
+func TestHealthReportExposesLoginBlock(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	cfg := proxyTestConfig(u, "alpha")
+	p, err := NewProxy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := p.accounts[0]
+	a.mu.Lock()
+	a.loginBlocked = time.Now().Add(90 * time.Second)
+	a.mu.Unlock()
+	report := p.healthReport()
+	if len(report) != 1 {
+		t.Fatalf("report length = %d", len(report))
+	}
+	if got := report[0]["login_block_seconds"]; got != 90 {
+		t.Errorf("login_block_seconds = %v, want 90", got)
+	}
+	if available, ok := report[0]["available"].(bool); !ok || available {
+		t.Errorf("available = %v, want false", report[0]["available"])
 	}
 }

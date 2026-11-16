@@ -196,8 +196,10 @@ Proxy tự probe từng acc định kỳ để loại acc chết/đăng nhập h
 - `HEALTH_CHECK_SECONDS` (mặc định 300) đặt chu kỳ; `HEALTH_CHECK_DISABLED=1` tắt.
 - Probe dùng đúng auth của acc (Open WebUI login hoặc LibreChat key tĩnh) vào một endpoint chỉ đọc (`/models`); ghi `status: ok|failed`, `latency_ms`, `checked_at`.
 - Acc `failed` bị bỏ khỏi vòng chọn và báo rõ khi ghim: `503 Selected account failed its health check: …`; sẽ tự hồi khi probe lại đạt.
-- `GET /v1/health` (hoặc `?probe=1` để chạy ngay), `POST /v1/health/probe` → báo cả report; cùng cơ chế xác thực Bearer.
-- Admin `GET/POST /api/admin/health`; trường `health` trong `/api/admin/state` để WebUI hiển thị badge “Health: lỗi”.
+- **Kiểm tra thủ công luôn probe thật**: nút “Kiểm tra” trong WebUI (và `POST /api/admin/accounts/<key>/test`) xoá verdict đang cache, đăng nhập lại rồi gọi `/models`, nên một lần lỗi mạng tạm thời không còn làm acc “kẹt unavailable” suốt cooldown. Probe thủ công thành công thì xoá luôn login-block và cooldown.
+- **Verdict cache không gây failover**: lỗi đọc từ cache (`Account login temporarily unavailable`, `Selected account is cooling down`, `Selected account failed its health check`) không đẩy request sang acc khác, vì acc đã chọn chưa hề được gọi. Chỉ lỗi thật từ upstream mới failover như mô tả ở mục 5.
+- `GET /v1/health` (hoặc `?probe=1` để chạy ngay), `POST /v1/health/probe` → báo cả report; cùng cơ chế xác thực Bearer. Cả hai đều là probe “thật” như nút Kiểm tra.
+- Admin `GET/POST /api/admin/health`; trường `health`, `cooldown_seconds` và `login_block_seconds` trong `/api/admin/state` để WebUI hiển thị badge “Health: lỗi” / “Chờ N giây” / “Chặn đăng nhập N giây”.
 - Lỗi probe được làm sạch (không lộ host/token/mật khẩu).
 
 ### Routing theo prefix `<id>/<model>`

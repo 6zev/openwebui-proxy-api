@@ -26,9 +26,10 @@
   }
 
   class APIError extends Error {
-    constructor(message, status) {
+    constructor(message, status, retryAfter = 0) {
       super(message);
       this.status = status;
+      this.retryAfter = retryAfter;
     }
   }
 
@@ -84,7 +85,8 @@
       if (!response.ok) {
         let payload;
         try { payload = await response.json(); } catch { payload = null; }
-        throw new APIError(errorMessage(payload, response.status), response.status);
+        const retry = Number(response.headers.get('Retry-After')) || 0;
+        throw new APIError(errorMessage(payload, response.status), response.status, retry);
       }
       if (options.raw) return response;
       let payload;
@@ -122,6 +124,7 @@
   function status(account) {
     if (!account.enabled) return badge('Đã tắt');
     if (account.health === 'failed') return badge('Health: lỗi', 'danger');
+    if (Number(account.login_block_seconds) > 0) return badge(`Chặn đăng nhập ${Math.ceil(account.login_block_seconds)} giây`, 'warn');
     if (Number(account.cooldown_seconds) > 0) return badge(`Chờ ${Math.ceil(account.cooldown_seconds)} giây`, 'warn');
     if (account.health === 'ok') return badge('Sẵn sàng', 'good');
     return account.available ? badge('Sẵn sàng', 'good') : badge('Chưa sẵn sàng', 'warn');
@@ -540,8 +543,13 @@
       await refresh();
     } catch (error) {
       if (current === session && error.name !== 'AbortError') {
-        $('account-test-result').textContent = `Kiểm tra ${id}: ${sanitized(error.message)}`;
+        // Say what the proxy actually saw, so a stale blocker is visible instead
+        // of being reported as a generic upstream failure.
+        const retry = Number(error.retryAfter) || 0;
+        const wait = retry > 0 ? ` (thử lại sau ${Math.ceil(retry)} giây)` : '';
+        $('account-test-result').textContent = `Kiểm tra ${id} thất bại: ${sanitized(error.message)}${wait}`;
         notice(error.message, true);
+        try { await refresh(); } catch { /* keep the test message on screen */ }
       }
     } finally { if (current === session) { testing.delete(id); renderAccounts(); } }
   }

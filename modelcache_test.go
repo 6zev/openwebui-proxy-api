@@ -152,7 +152,7 @@ func TestProbeDoesNotFailSlowUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.probe(context.Background(), p.accounts[0]); err != nil {
+	if err := p.probe(context.Background(), p.accounts[0], false); err != nil {
 		t.Fatalf("slow but healthy upstream reported a failure: %v", err)
 	}
 	if status, _, _, _ := p.accounts[0].health.snapshot(); status != healthOK {

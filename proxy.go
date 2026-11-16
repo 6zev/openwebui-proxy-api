@@ -55,12 +55,14 @@ type Config struct {
 	Timeout, Cooldown time.Duration
 }
 type account struct {
-	config        AccountConfig
-	client        *http.Client
-	mu            sync.Mutex
-	token         string
-	expires       time.Time
-	loginBlocked  time.Time
+	config       AccountConfig
+	client       *http.Client
+	mu           sync.Mutex
+	token        string
+	expires      time.Time
+	loginBlocked time.Time
+	// probeMu serialises operator-triggered probes for this account.
+	probeMu       sync.Mutex
 	cooldownMu    sync.Mutex
 	cooldownUntil time.Time
 	health        accountHealth
@@ -79,6 +81,19 @@ type apiError struct {
 	status     int
 	message    string
 	retryAfter int
+}
+
+// apiErrorStored is an apiError whose verdict came from cached state (cooldown,
+// login block, last probe result) instead of an upstream round-trip. A stored
+// verdict never causes failover, because the selected account was not contacted
+// yet; a real upstream failure still does.
+type apiErrorStored struct{ *apiError }
+
+func (e *apiErrorStored) Unwrap() error { return e.apiError }
+func (e *apiErrorStored) Error() string { return e.apiError.message }
+
+func storedError(status int, message string, retryAfter int) error {
+	return &apiErrorStored{&apiError{status: status, message: message, retryAfter: retryAfter}}
 }
 
 func (e *apiError) Error() string { return e.message }
@@ -234,6 +249,26 @@ func (p *Proxy) cooldown(a *account, d time.Duration) {
 		a.cooldownUntil = until
 	}
 }
+
+// loginBlockSeconds exposes the remaining login block so health output can say
+// why an account is unavailable even when its last probe looked fine.
+func (a *account) loginBlockSeconds() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return remaining(a.loginBlocked)
+}
+
+// clearStaleBlocks drops every cached "do not use this account" verdict. It is
+// called once real evidence arrives: a completed login or a completed probe.
+func (a *account) clearStaleBlocks() {
+	a.mu.Lock()
+	a.loginBlocked = time.Time{}
+	a.mu.Unlock()
+	a.cooldownMu.Lock()
+	a.cooldownUntil = time.Time{}
+	a.cooldownMu.Unlock()
+}
+
 func accountCooldown(a *account) int {
 	a.cooldownMu.Lock()
 	defer a.cooldownMu.Unlock()
@@ -298,10 +333,10 @@ func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
 			return nil, &apiError{503, "Selected account or website is disabled", 0}
 		}
 		if n := accountCooldown(a); n > 0 {
-			return nil, &apiError{429, "Selected account is cooling down", n}
+			return nil, storedError(429, "Selected account is cooling down", n)
 		}
 		if status, _, reason, _ := a.health.snapshot(); status == healthFailed {
-			return nil, &apiError{503, "Selected account failed its health check: " + reason, 0}
+			return nil, storedError(503, "Selected account failed its health check: "+reason, 0)
 		}
 		return []*account{a}, nil
 	}
@@ -347,7 +382,7 @@ func (p *Proxy) login(ctx context.Context, a *account) (string, error) {
 		return a.token, nil
 	}
 	if time.Now().Before(a.loginBlocked) {
-		return "", &apiError{503, "Account login temporarily unavailable", remaining(a.loginBlocked)}
+		return "", storedError(503, "Account login temporarily unavailable", remaining(a.loginBlocked))
 	}
 	loginCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -417,8 +452,10 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 	auth, err := backendAuthHeader(ctx, p, a)
 	if err != nil {
 		var e *apiError
-		// A service-wide login rate limit is not a reason to rotate accounts.
-		retry := ctx.Err() == nil && !(errors.As(err, &e) && e.status == 429)
+		// Stored verdicts mean the selected account was never contacted, so
+		// there is nothing to fail over from; a service-wide login rate limit is
+		// not a reason to rotate accounts either.
+		retry := ctx.Err() == nil && !isStoredErr(err) && !(errors.As(err, &e) && e.status == 429)
 		return nil, err, retry
 	}
 	staticKey := a.config.Backend == BackendLibreChat
@@ -496,13 +533,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet && (r.URL.Path == "/v1/health" || r.URL.Path == "/v1/healthz") {
 		if r.URL.Query().Get("probe") == "1" {
-			p.runHealthProbes(r.Context())
+			p.runHealthProbes(r.Context(), true)
 		}
 		writeJSON(w, 200, map[string]any{"object": "list", "data": p.healthReport()})
 		return
 	}
 	if r.Method == http.MethodPost && r.URL.Path == "/v1/health/probe" {
-		failures := p.runHealthProbes(r.Context())
+		failures := p.runHealthProbes(r.Context(), true)
 		writeJSON(w, 200, map[string]any{"object": "list", "failures": failures, "data": p.healthReport()})
 		return
 	}

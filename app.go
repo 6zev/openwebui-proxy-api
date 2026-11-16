@@ -80,7 +80,7 @@ func (a *Application) healthLoop(ctx context.Context, interval time.Duration) {
 
 func (a *Application) probeOnce(ctx context.Context) {
 	proxy, _, _ := a.snapshot()
-	proxy.runHealthProbes(ctx)
+	proxy.runHealthProbes(ctx, false)
 }
 
 func (a *Application) CloseIdleConnections() { p, _, _ := a.snapshot(); p.CloseIdleConnections() }
@@ -100,7 +100,7 @@ func redactedProxy(raw string) string {
 func (a *Application) healthHandler(w http.ResponseWriter, r *http.Request) {
 	proxy, _, _ := a.snapshot()
 	if r.Method == http.MethodPost || r.URL.Query().Get("probe") == "1" {
-		proxy.runHealthProbes(r.Context())
+		proxy.runHealthProbes(r.Context(), true)
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": proxy.healthReport()})
 }
@@ -483,6 +483,23 @@ func (a *Application) testAccount(w http.ResponseWriter, r *http.Request, key st
 	}
 	if selected == nil {
 		writeError(w, &apiError{404, "Account not found", 0})
+		return
+	}
+	// The operator asked for live evidence, so the check must not replay the
+	// proxy's cached verdict: probe the upstream with fresh credentials and let
+	// the result overwrite the stored health. Otherwise a transient failure
+	// keeps the account "unavailable" for a full cooldown and the button looks
+	// broken even while the upstream signs in fine.
+	selected.probeMu.Lock()
+	defer selected.probeMu.Unlock()
+	if selected.config.Disabled {
+		writeError(w, &apiError{503, "Account is disabled", 0})
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(r.Context(), p.probeTimeout())
+	defer cancel()
+	if err := p.probe(probeCtx, selected, true); err != nil {
+		writeError(w, err)
 		return
 	}
 	clone := r.Clone(r.Context())
