@@ -57,7 +57,8 @@ WebUI ghi file này tự động; có thể sửa tay khi proxy đang dừng:
 }
 ```
 
-- `websites[]` mỗi phần tử là một Open WebUI độc lập: `id` (bắt buộc), `name` (tùy chọn, trống sẽ hiển thị ID), `base_url`, `proxy_url` tùy chọn, `disabled` tùy chọn.
+- `websites[]` mỗi phần tử là một Open WebUI độc lập: `id` (bắt buộc), `name` (tùy chọn, trống sẽ hiển thị ID), `base_url`, `proxy_url` tùy chọn, `disabled` tùy chọn, `timeout_ms` tùy chọn.
+- `timeout_ms` (website, 1–3600000) đặt ngân sách upstream riêng cho website đó — dùng cho host chậm; bỏ trống hoặc `0` là kế thừa `UPSTREAM_TIMEOUT_MS`. Request đi qua nhiều acc thì lấy ngân sách lớn nhất trong các acc ứng viên, và health probe của acc đó cũng dùng ngân sách này. Sửa được trong WebUI ở form website.
 - `accounts[]` gắn với một website qua `website_id`; `proxy_url` tùy chọn ghi đè proxy của website. `base_url` chỉ dùng cho tài khoản legacy không có `website_id`.
 - `name` của tài khoản cũng tùy chọn; để trống sẽ dùng `id`. **Độ dài tối thiểu của `PROXY_API_KEY`/`ADMIN_API_KEY` là 5 ký tự** — đủ cho cài đặt nội bộ, nhưng hãy đặt khóa dài ngẫu nhiên và chạy sau HTTPS khi mở ra ngoài.
 - ID (website và tài khoản) là duy nhất toàn cục, `1–64` ký tự ASCII: chữ, số, `.`, `_`, `-`. Không sửa ID sau khi tạo.

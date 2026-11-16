@@ -284,6 +284,11 @@ X-Account-ID: &lt;account_id&gt;  <span class="code-comment"># tuỳ chọn</spa
             <label for="entity-url">Địa chỉ upstream <span class="req">*</span></label>
             <input id="entity-url" name="base_url" type="url" placeholder="https://webui.example.com">
           </div>
+          <div class="field">
+            <label for="entity-timeout">Timeout riêng (ms) <span class="opt">tuỳ chọn</span></label>
+            <input id="entity-timeout" name="timeout_ms" type="number" min="0" max="3600000" step="500" inputmode="numeric" placeholder="Để trống để dùng UPSTREAM_TIMEOUT_MS">
+            <p class="hint">Dành cho upstream chậm: đặt lớn hơn timeout chung. Để trống hoặc 0 để kế thừa.</p>
+          </div>
         </div>
         <div id="account-fields" hidden>
           <div class="field">

@@ -110,7 +110,7 @@ func (a *Application) state(w http.ResponseWriter) {
 	sites := make([]map[string]any, 0, len(cfg.Websites))
 	accounts := make([]map[string]any, 0, len(cfg.Accounts))
 	for _, s := range cfg.Websites {
-		sites = append(sites, map[string]any{"id": s.ID, "name": displayName(s.ID, s.Name), "stored_name": s.Name, "base_url": s.BaseURL, "enabled": !s.Disabled, "proxy_url": redactedProxy(s.ProxyURL), "proxy_configured": s.ProxyURL != ""})
+		sites = append(sites, map[string]any{"id": s.ID, "name": displayName(s.ID, s.Name), "stored_name": s.Name, "base_url": s.BaseURL, "enabled": !s.Disabled, "proxy_url": redactedProxy(s.ProxyURL), "proxy_configured": s.ProxyURL != "", "timeout_ms": s.TimeoutMS})
 	}
 	for _, c := range cfg.Accounts {
 		available := false
@@ -244,11 +244,12 @@ func (a *Application) mutate(change func(*configDocument) error) error {
 }
 
 type websiteDraft struct {
-	ID       string  `json:"id"`
-	Name     *string `json:"name"`
-	BaseURL  *string `json:"base_url"`
-	ProxyURL *string `json:"proxy_url"`
-	Enabled  *bool   `json:"enabled"`
+	ID        string  `json:"id"`
+	Name      *string `json:"name"`
+	BaseURL   *string `json:"base_url"`
+	ProxyURL  *string `json:"proxy_url"`
+	Enabled   *bool   `json:"enabled"`
+	TimeoutMS *int    `json:"timeout_ms"`
 }
 type accountDraft struct {
 	ID        string  `json:"id"`
@@ -324,6 +325,9 @@ func (a *Application) websiteMutation(w http.ResponseWriter, r *http.Request, id
 		}
 		if draft.Enabled != nil {
 			site.Disabled = !*draft.Enabled
+		}
+		if draft.TimeoutMS != nil {
+			site.TimeoutMS = *draft.TimeoutMS
 		}
 		if index >= 0 {
 			doc.Websites[index] = site

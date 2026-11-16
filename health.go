@@ -80,9 +80,17 @@ func sanitizeProbeError(err error) string {
 // probeTimeout bounds a single probe. It deliberately does not shrink the
 // configured timeout to a fixed ceiling: slow-but-healthy upstreams (a model
 // list that takes 20s) would otherwise be marked broken forever.
-func (p *Proxy) probeTimeout() time.Duration {
+func (p *Proxy) probeTimeout() time.Duration { return p.probeTimeoutFor(nil) }
+
+// probeTimeoutFor prefers the probe override, then the account's effective
+// timeout: a website configured for a slow host must not be marked broken by the
+// global budget. A nil account falls back to the global timeout.
+func (p *Proxy) probeTimeoutFor(a *account) time.Duration {
 	if p.config.ProbeTimeout > 0 {
 		return p.config.ProbeTimeout
+	}
+	if a != nil && a.timeout > 0 {
+		return a.timeout
 	}
 	return p.config.Timeout
 }
@@ -132,7 +140,7 @@ func (p *Proxy) loginProbe(ctx context.Context, a *account) (string, error) {
 	if a.token != "" && (a.expires.IsZero() || time.Until(a.expires) > 30*time.Second) {
 		return a.token, nil
 	}
-	loginCtx, cancel := context.WithTimeout(ctx, p.probeLoginTimeout())
+	loginCtx, cancel := context.WithTimeout(ctx, p.probeLoginTimeout(a))
 	defer cancel()
 	data, _ := json.Marshal(map[string]string{"email": a.config.Email, "password": a.config.Password})
 	req, err := http.NewRequestWithContext(loginCtx, http.MethodPost, a.config.BaseURL+"/api/v1/auths/signin", bytes.NewReader(data))
@@ -188,7 +196,7 @@ func (p *Proxy) probe(ctx context.Context, a *account, deep bool) error {
 		a.health.record(err, time.Since(start))
 		return err
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, p.probeTimeout())
+	probeCtx, cancel := context.WithTimeout(ctx, p.probeTimeoutFor(a))
 	defer cancel()
 	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, a.config.BaseURL+path, nil)
 	if err != nil {
@@ -244,8 +252,8 @@ func probeErrorText(status int) string {
 // full upstream timeout: a host that needs 20s to answer a model list usually
 // signs in fast, and a host that cannot sign in within a few seconds is not
 // usable anyway.
-func (p *Proxy) probeLoginTimeout() time.Duration {
-	budget := p.probeTimeout()
+func (p *Proxy) probeLoginTimeout(a *account) time.Duration {
+	budget := p.probeTimeoutFor(a)
 	if budget <= 0 || budget > probeLoginTimeout {
 		return probeLoginTimeout
 	}

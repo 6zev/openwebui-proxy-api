@@ -23,6 +23,10 @@ type WebsiteConfig struct {
 	BaseURL  string `json:"base_url"`
 	ProxyURL string `json:"proxy_url,omitempty"`
 	Disabled bool   `json:"disabled,omitempty"`
+	// TimeoutMS overrides the global upstream timeout for this website's
+	// accounts. Slow hosts (a model list that takes 20s) need a budget of their
+	// own; zero or absent means inherit Config.Timeout.
+	TimeoutMS int `json:"timeout_ms,omitempty"`
 }
 type AccountConfig struct {
 	ID        string `json:"id"`
@@ -55,7 +59,10 @@ type Config struct {
 	Timeout, Cooldown time.Duration
 }
 type account struct {
-	config       AccountConfig
+	config AccountConfig
+	// timeout is the effective upstream budget for this account: the website
+	// override when present, otherwise the global one.
+	timeout      time.Duration
 	client       *http.Client
 	mu           sync.Mutex
 	token        string
@@ -121,6 +128,15 @@ func displayName(id, name string) string {
 }
 
 func NewProxy(c Config) (*Proxy, error) { return buildProxy(c, false) }
+
+// timeoutFor resolves the effective upstream budget: a website override wins,
+// then the global timeout. Positive values only; buildProxy rejects negatives.
+func timeoutFor(c Config, overrideMS int) time.Duration {
+	if overrideMS > 0 {
+		return time.Duration(overrideMS) * time.Millisecond
+	}
+	return c.Timeout
+}
 func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 	if len(c.APIKey) < minAPIKeyLength {
 		return nil, fmt.Errorf("PROXY_API_KEY must contain at least %d characters", minAPIKeyLength)
@@ -156,7 +172,10 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 		if len(s.Name) > 160 || !validBaseURL(s.BaseURL) {
 			return nil, fmt.Errorf("website %s requires a valid HTTP(S) URL (name is optional)", s.ID)
 		}
-		client, err := newOutboundClient(s.ProxyURL, c.Timeout)
+		if s.TimeoutMS < 0 || s.TimeoutMS > 3600000 {
+			return nil, fmt.Errorf("website %s: timeout_ms must be between 1 and 3600000", s.ID)
+		}
+		client, err := newOutboundClient(s.ProxyURL, timeoutFor(c, s.TimeoutMS))
 		if err != nil {
 			return nil, fmt.Errorf("website %s: invalid outbound proxy configuration", s.ID)
 		}
@@ -205,12 +224,16 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 		if proxyURL == "" {
 			proxyURL = c.OutboundProxy
 		}
-		client, err := newOutboundClient(proxyURL, c.Timeout)
+		timeout := c.Timeout
+		if a.WebsiteID != "" {
+			timeout = timeoutFor(c, p.sites[a.WebsiteID].TimeoutMS)
+		}
+		client, err := newOutboundClient(proxyURL, timeout)
 		if err != nil {
 			return nil, fmt.Errorf("account %s: invalid outbound proxy configuration", a.ID)
 		}
 		a.ProxyURL = proxyURL
-		p.accounts = append(p.accounts, &account{config: a, client: client})
+		p.accounts = append(p.accounts, &account{config: a, timeout: timeout, client: client})
 	}
 	return p, nil
 }
@@ -286,6 +309,23 @@ func remaining(t time.Time) int {
 	}
 	return int((d + time.Second - 1) / time.Second)
 }
+
+// requestTimeout is the budget for a routed request: the largest effective
+// timeout among the accounts that may serve it, so a slow website is not cut
+// short by a faster neighbour's limit before failover even gets a chance.
+func (p *Proxy) requestTimeout(candidates []*account) time.Duration {
+	limit := time.Duration(0)
+	for _, a := range candidates {
+		if a.timeout > limit {
+			limit = a.timeout
+		}
+	}
+	if limit <= 0 {
+		return p.config.Timeout
+	}
+	return limit
+}
+
 func (p *Proxy) candidates(id string) ([]*account, error) { return p.candidatesFor(id, "") }
 func underAny(path string, prefixes ...string) bool {
 	for _, prefix := range prefixes {
@@ -426,16 +466,23 @@ func (p *Proxy) login(ctx context.Context, a *account) (string, error) {
 	}
 	return a.token, nil
 }
+
+// retryDuration turns Retry-After into a cooldown. It never shortens the
+// configured cooldown: a bare Retry-After: 0 (or a past HTTP-date) means "wait
+// zero seconds", and honouring that literally would put the throttled account
+// straight back into rotation to be throttled again.
 func (p *Proxy) retryDuration(s string) time.Duration {
 	d := p.config.Cooldown
-	if n, err := strconv.ParseInt(s, 10, 32); err == nil && n > 0 {
-		if v := time.Duration(n) * time.Second; v > d {
-			d = v
-		}
+	candidate := time.Duration(0)
+	if n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 32); err == nil && n > 0 {
+		candidate = time.Duration(n) * time.Second
 	} else if t, err := http.ParseTime(s); err == nil {
-		if v := time.Until(t); v > d {
-			d = v
+		if v := time.Until(t); v > 0 {
+			candidate = v
 		}
+	}
+	if candidate > d {
+		return candidate
 	}
 	return d
 }
@@ -645,7 +692,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), p.config.Timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), p.requestTimeout(candidates))
 	defer cancel()
 	// Serve a fresh cached model list before touching (possibly very slow)
 	// upstreams. Only /v1/models is cached; chat is never replayed from cache.
@@ -802,7 +849,7 @@ func (p *Proxy) forwardBody(w http.ResponseWriter, r *http.Request, body []byte,
 	if r.URL.RawQuery != "" {
 		upstreamPath += "?" + r.URL.RawQuery
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), p.config.Timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), p.requestTimeout(candidates))
 	defer cancel()
 	var response *http.Response
 	for _, a := range candidates {
@@ -843,5 +890,9 @@ func (p *Proxy) forwardBody(w http.ResponseWriter, r *http.Request, body []byte,
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, io.LimitReader(response.Body, 16<<20))
+	if _, copyErr := io.Copy(w, io.LimitReader(response.Body, 16<<20)); copyErr != nil {
+		// The upstream died mid-body. Abort the connection so the client sees a
+		// truncated transfer instead of a complete-looking short response.
+		panic(http.ErrAbortHandler)
+	}
 }

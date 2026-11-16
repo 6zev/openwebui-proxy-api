@@ -677,3 +677,102 @@ func TestProxyChatForwardsToolDefinitions(t *testing.T) {
 		t.Errorf("features flags dropped: %v", got["features"])
 	}
 }
+
+// A website with slow models must get its own budget: the global timeout should
+// not cut a request short before the slow upstream has a chance to answer.
+func TestWebsiteTimeoutOverrideAppliesToRequests(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	u.onModel = func(_ string, w http.ResponseWriter, _ *http.Request) bool {
+		time.Sleep(400 * time.Millisecond)
+		return false
+	}
+	cfg := proxyTestConfig(u)
+	cfg.Timeout = 100 * time.Millisecond
+	cfg.Websites = []WebsiteConfig{{ID: "slow", BaseURL: u.server.URL, TimeoutMS: 3000}}
+	cfg.Accounts = []AccountConfig{{ID: "alpha", WebsiteID: "slow", Email: "alpha@example.test", Password: "password-alpha"}}
+	p, err := NewProxy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.accounts[0].timeout; got != 3*time.Second {
+		t.Fatalf("account timeout = %v, want the website override", got)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+testProxyKey)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("slow website was cut short: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWebsiteTimeoutOverrideValidation(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	for _, timeout := range []int{-1, 3600001} {
+		cfg := proxyTestConfig(u)
+		cfg.Websites = []WebsiteConfig{{ID: "bad", BaseURL: u.server.URL, TimeoutMS: timeout}}
+		cfg.Accounts = []AccountConfig{{ID: "alpha", WebsiteID: "bad", Email: "a@example.test", Password: "p"}}
+		if _, err := NewProxy(cfg); err == nil {
+			t.Errorf("timeout_ms=%d was accepted", timeout)
+		}
+	}
+}
+
+// Retry-After: 0 means "no wait", which must not override the configured
+// cooldown; otherwise the throttled account is retried immediately.
+func TestRetryAfterZeroKeepsCooldown(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	u.onChat = func(id string, _ int, w http.ResponseWriter, _ *http.Request, _ map[string]any) bool {
+		if id == "alpha" {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return true
+		}
+		return false
+	}
+	cfg := proxyTestConfig(u, "alpha", "beta")
+	cfg.Cooldown = 5 * time.Second
+	s := newProxyTestServer(t, cfg)
+	requireProxyStatus(t, proxyTestRequest(t, s, http.MethodPost, "/v1/chat/completions", testChatBody, testProxyKey, ""), http.StatusTooManyRequests)
+	resp := proxyTestRequest(t, s, http.MethodPost, "/v1/chat/completions", testChatBody, testProxyKey, "")
+	requireProxyStatus(t, resp, http.StatusOK)
+	if resp.header.Get("X-Account-ID") != "beta" {
+		t.Errorf("throttled account came back too early: %q", resp.header.Get("X-Account-ID"))
+	}
+}
+
+// A passthrough response that dies mid-body must abort the client connection
+// instead of framing a complete-looking short body.
+func TestPassthroughTruncatedBodyAborts(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auths/signin" {
+			_, _ = io.WriteString(w, `{"token":"t-token-1","expires_at":4102444800}`)
+			return
+		}
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		// Announce 200 bytes, send 10, then drop the connection.
+		_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 200\r\n\r\n{\"data\":1}")
+		_ = rw.Flush()
+	}))
+	defer upstream.Close()
+	cfg := proxyTestConfig(u, "alpha")
+	cfg.Accounts[0].BaseURL = upstream.URL
+	s := newProxyTestServer(t, cfg)
+	req, _ := http.NewRequest(http.MethodPost, s.URL+"/api/v1/tools/list", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+testProxyKey)
+	resp, err := s.Client().Do(req)
+	if err != nil {
+		return // connection aborted before headers: acceptable
+	}
+	_, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr == nil {
+		t.Error("truncated passthrough body was reported as complete")
+	}
+}
