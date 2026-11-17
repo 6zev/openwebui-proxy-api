@@ -104,3 +104,40 @@ func TestStreamUsageDefaultsToZero(t *testing.T) {
 		t.Errorf("usage absent:\n%s", all)
 	}
 }
+
+// A Responses client only accepts a message item it was told about, and treats a
+// second response.completed as an unfinished answer. The stream must therefore
+// carry the full item envelope and close exactly once.
+func TestResponsesStreamEnvelopeAndSingleTerminal(t *testing.T) {
+	state, _ := newStreamState(surfaceResponses, "gpt")
+	var events []string
+	feed := func(payload string) bool {
+		out, done, err := state.convertChatStream([]byte(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range out {
+			events = append(events, string(event))
+		}
+		return done
+	}
+	feed(`{"id":"c1","created":5,"choices":[{"delta":{"content":"hi"}}]}`)
+	feed(`{"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
+	done := feed(`[DONE]`)
+	if !done {
+		t.Fatal("[DONE] not reported")
+	}
+	all := strings.Join(events, "")
+	for _, want := range []string{"response.created", "response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("missing %s:\n%s", want, all)
+		}
+	}
+	if got := strings.Count(all, `"type":"response.completed"`); got != 1 {
+		t.Errorf("response.completed emitted %d times, want 1", got)
+	}
+	// The terminal event must be last.
+	if !strings.HasSuffix(strings.TrimSpace(all), "}") || strings.LastIndex(all, "response.completed") < strings.LastIndex(all, "output_item.done") {
+		t.Errorf("response.completed is not final:\n%s", all)
+	}
+}

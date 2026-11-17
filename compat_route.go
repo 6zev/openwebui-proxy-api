@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -154,13 +155,27 @@ func translateStream(w http.ResponseWriter, response *http.Response, kind surfac
 		if convErr != nil {
 			return convErr
 		}
+		if len(chunks) > 0 && !finished {
+			// Terminal events arrive with the last finish_reason chunk; remember
+			// that so [DONE] does not repeat them.
+			for _, chunk := range chunks {
+				if bytes.Contains(chunk, []byte("\"type\":\"response.completed\"")) || bytes.Contains(chunk, []byte("\"type\":\"message_stop\"")) {
+					finished = true
+				}
+			}
+		}
 		if err := write(chunks); err != nil {
 			return err
 		}
-		if done && !finished {
+		if done {
+			// [DONE] is the end of the stream. Close the message exactly once:
+			// if a finish_reason already produced the terminal event, emitting
+			// another response.completed/message_stop makes clients treat the
+			// answer as unfinished and retry the whole request.
+			if finished {
+				return nil
+			}
 			finished = true
-			// The upstream sent [DONE] before a finish_reason; close the message
-			// anyway so the client is not left waiting on a terminal event.
 			return write(state.finalEvents("stop"))
 		}
 		return nil

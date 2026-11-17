@@ -580,6 +580,10 @@ type streamState struct {
 	textOpen  bool
 	nextBlock int
 	tools     map[int]*toolBlockState
+	// itemOpen tracks the Responses output item, which needs its own add/done
+	// events around the text deltas.
+	itemOpen  bool
+	textBuf   strings.Builder
 	done      bool
 	promptTok int
 	compleTok int
@@ -646,6 +650,43 @@ func newStreamState(target surfaceKind, model string) (*streamState, [][]byte) {
 	return st, nil
 }
 
+// itemID names the output item a Responses client must track. Response ids are
+// reused across chunks by upstream, so the item id is derived once per stream.
+func (st *streamState) itemID(index int) string {
+	if st.messageID == "" {
+		st.messageID = "resp_compat"
+	}
+	return st.messageID + "-item-" + itoa(index)
+}
+
+// openResponsesItem emits the Responses envelope for the message item the first
+// time text arrives: response.created plus response.output_item.added and
+// response.content_part.added. Without these a Responses client sees deltas for
+// an item it never learned about and simply retries.
+func (st *streamState) openResponsesItem() [][]byte {
+	if st.itemOpen {
+		return nil
+	}
+	st.itemOpen = true
+	response := map[string]any{
+		"id": st.messageID, "object": "response", "status": "in_progress",
+		"model": st.model, "created_at": st.createdAt, "output": []any{},
+	}
+	item := map[string]any{
+		"type": "message", "id": st.itemID(0), "role": "assistant", "status": "in_progress",
+		"content": []any{},
+	}
+	part := map[string]any{"type": "output_text", "text": "", "annotations": []any{}}
+	return [][]byte{
+		sseEvent("response.created", map[string]any{"type": "response.created", "response": response}),
+		sseEvent("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": 0, "item": item}),
+		sseEvent("response.content_part.added", map[string]any{
+			"type": "response.content_part.added", "item_id": st.itemID(0),
+			"output_index": 0, "content_index": 0, "part": part,
+		}),
+	}
+}
+
 // openTextBlock emits content_block_start for the text block, once.
 func (st *streamState) openTextBlock() [][]byte {
 	if st.textOpen {
@@ -701,8 +742,10 @@ func (st *streamState) convertChatStream(chatEvent []byte) ([][]byte, bool, erro
 					"delta": map[string]any{"type": "text_delta", "text": delta.Content},
 				}))
 			case surfaceResponses:
+				out = append(out, st.openResponsesItem()...)
+				st.textBuf.WriteString(delta.Content)
 				out = append(out, sseEvent("response.output_text.delta", map[string]any{
-					"type": "response.output_text.delta", "item_id": st.messageID, "output_index": 0,
+					"type": "response.output_text.delta", "item_id": st.itemID(0), "output_index": 0,
 					"content_index": 0, "delta": delta.Content,
 				}))
 			}
@@ -827,7 +870,27 @@ func (st *streamState) finalEvents(finishReason string) [][]byte {
 		out = append(out, sseEvent("message_stop", map[string]any{"type": "message_stop"}))
 		return out
 	}
-	// Responses: report the aggregated usage on the terminal event.
+	// Responses: close the item and its content part, then report the real
+	// usage on the terminal event.
+	if st.itemOpen {
+		st.textOpen = false
+		out = append(out, sseEvent("response.output_text.done", map[string]any{
+			"type": "response.output_text.done", "item_id": st.itemID(0),
+			"output_index": 0, "content_index": 0, "text": st.textBuf.String(),
+		}))
+		out = append(out, sseEvent("response.content_part.done", map[string]any{
+			"type": "response.content_part.done", "item_id": st.itemID(0), "output_index": 0, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": st.textBuf.String(), "annotations": []any{}},
+		}))
+		out = append(out, sseEvent("response.output_item.done", map[string]any{
+			"type": "response.output_item.done", "output_index": 0,
+			"item": map[string]any{
+				"type": "message", "id": st.itemID(0), "role": "assistant", "status": "completed",
+				"content": []map[string]any{{"type": "output_text", "text": st.textBuf.String(), "annotations": []any{}}},
+			},
+		}))
+		st.itemOpen = false
+	}
 	status := "completed"
 	if finishReason == "length" {
 		status = "incomplete"

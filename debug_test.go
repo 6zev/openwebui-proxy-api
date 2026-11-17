@@ -72,7 +72,7 @@ func TestDebugWarnsAboutUnsupportedResponsesFields(t *testing.T) {
 	body := `{"model":"m","input":"hi","reasoning":{"effort":"low"},"store":false}`
 	proxyTestRequest(t, s, http.MethodPost, "/openai/responses", body, testProxyKey, "")
 	out := buf.String()
-	if !strings.Contains(out, "WARNING /openai/responses") || !strings.Contains(out, "reasoning") || !strings.Contains(out, "store") {
+	if !strings.Contains(out, "NOTE /openai/responses") || !strings.Contains(out, "reasoning") || !strings.Contains(out, "store") {
 		t.Errorf("missing Responses warning; got:\n%s", out)
 	}
 }

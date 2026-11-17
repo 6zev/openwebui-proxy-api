@@ -936,8 +936,10 @@ func (p *Proxy) debugSurfaceBody(r *http.Request, body []byte, target string) {
 	var model string
 	_ = json.Unmarshal(input["model"], &model)
 	p.debugf("debug: %s %s upstream=%s model=%q body=%dB keys=%v", r.Method, r.URL.Path, target, model, len(body), keys)
-	if len(suspicious) > 0 {
-		p.debugf("debug: WARNING %s carries %v; Open WebUI's /openai/responses rejects these with 400. Remove them in the client if the call fails.", r.URL.Path, suspicious)
+	if len(suspicious) > 0 && (target == "/openai/responses" || strings.HasSuffix(r.URL.Path, "/responses")) {
+		// Only the Responses route is known to reject these; /v1/messages and
+		// /openai/* helpers accept several of them, so warning there is noise.
+		p.debugf("debug: NOTE %s carries %v; Open WebUI's /openai/responses rejects these with 400. Remove them in the client if the call fails.", r.URL.Path, suspicious)
 	}
 }
 
