@@ -28,7 +28,11 @@ var surfaceMappings = []surfaceMapping{
 	// Open WebUI mounts the Anthropic Messages API at /api/v1/messages only; its
 	// bare /v1/messages route answers 405.
 	{"/v1/messages", "/api/v1/messages"},
-	{"/v1/messages/count_tokens", "/api/v1/messages/count_tokens"},
+	// /api/v1/messages/count_tokens answers 405 on a real deployment: Open WebUI
+	// serves token counting under the OpenAI-namespaced router instead. The
+	// /v1/ prefix entry below keeps any deeper variant alive.
+	{"/v1/messages/count_tokens", "/openai/messages/count_tokens"},
+	{"/v1/messages/count_tokens/", "/openai/messages/count_tokens/"},
 	{"/v1/files/", ""},
 	{"/v1/tools/", ""},
 	{"/v1/knowledge/", ""},

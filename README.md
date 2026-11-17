@@ -204,6 +204,25 @@ Bật `DEBUG_LOG=1` rồi khởi động lại. Log đi ra stderr **và** vào v
 - Không bao giờ log header `Authorization`, khoá proxy hay mật khẩu; body lỗi được lọc ký tự điều khiển trước khi ghi.
 - Tắt mặc định: khi `DEBUG_LOG` không bật, proxy chỉ log lúc khởi động và lỗi nghiêm trọng.
 
+### `debug: model-cache refresh failed` (connection timed out)
+
+Upstream đang treo, không phải proxy treo. Mặc định mỗi acc có 300s ngân sách, nên một lần treo TCP kéo dài ~2m47s trước khi bị bỏ. Cache vẫn phục vụ bản cũ (`X-Model-Cache: stale-error`) nên client không bị chặn, nhưng log sẽ ồn.
+
+- Đặt `timeout_ms` cho website đó (ví dụ `20000`) để lần treo sau bị cắt sau 20s thay vì gần 3 phút.
+- Nếu host lúc được lúc không: giữ nguyên, chỉ khi log đầy mới cần siết. Đây là log mức `debug`, tắt `DEBUG_LOG` là hết.
+
+### `POST /v1/messages` trả 400: `tools: List should have at least 1 item`
+
+Client Anthropic gửi `"tools": []` (mảng rỗng) — Open WebUI từ chối. Không phải lỗi proxy: bỏ trường `tools` khi rỗng ở phía client, hoặc bật ít nhất một tool.
+
+### `POST /v1/responses` trả 404 từ một website
+
+Route Responses chỉ có trên upstream mount `/openai`. Đã probe: `kaethegpt.duckdns.org` trả `404 {"type":"not_found_error"}` cho `/openai/responses`, trong khi `ai.baselgovernance.org` trả `401` (route tồn tại). Khi client dùng ghim `X-Website-ID`, request sẽ dừng ở website đó và fail hẳn thay vì failover — đúng thiết kế. Không ghim, hoặc dùng website có Responses.
+
+### `POST /v1/messages/count_tokens` trả 405 (Method Not Allowed)
+
+Open WebUI **không** phục vụ `POST /api/v1/messages/count_tokens` (đã probe: 405 + `{"detail":"Method Not Allowed"}` trên cả hai host). Từ v0.13.0 proxy chuyển `/v1/messages/count_tokens` sang `/openai/messages/count_tokens`, nơi Open WebUI đặt bộ đếm token (`401` khi chưa auth = route tồn tại). Một số client chấp nhận 405 cho count_tokens và tự bỏ qua; muốn sạch log thì cập nhật proxy.
+
 ### Gặp `Open WebUI returned HTTP 400` từ editor (Cline/Roo/Copilot…)
 
 Triệu chứng: client báo `502 … Open WebUI returned HTTP 400` khi gọi Responses API, có thể kèm “retried 5 times”. Nguyên nhân thường gặp **không phải** proxy: client gửi field mà bản Open WebUI của bạn không nhận, và upstream chỉ trả `400` trống.
@@ -242,7 +261,7 @@ Proxy expose toàn bộ surface chính thức của Open WebUI qua cùng một k
 | Chuẩn | Endpoint phía proxy | Chuyển tới Open WebUI |
 | --- | --- | --- |
 | OpenAI | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/embeddings(/{idx})`, `GET /v1/files/…`, `GET /v1/tools/…`, `GET /v1/mcp/…`, `GET /v1/knowledge/…`, `GET /v1/audio/…` | `/api/v1/…` (chat/models có xử lý riêng: chuẩn hoá model, streaming, chọn acc) |
-| Anthropic Messages | `POST /v1/messages`, `POST /v1/messages/count_tokens` | `/api/v1/messages…` |
+| Anthropic Messages | `POST /v1/messages`, `POST /v1/messages/count_tokens` | `/api/v1/messages`, `/openai/messages/count_tokens` |
 | OpenAI Responses | `POST /v1/responses`, `GET|POST /v1/responses/{id}` | `/openai/responses…` |
 | Ollama native | `/ollama/api/*` (tags, chat, generate, embed, ps, version…) | `/ollama/api/*` verbatim |
 | Upstream OpenAI router | `/openai/*` (models, chat/completions, audio/speech, responses) | verbatim |

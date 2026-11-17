@@ -18,7 +18,7 @@ func TestMapSurfacePath(t *testing.T) {
 		{"/v1/embeddings", "/api/embeddings", true},
 		{"/v1/embeddings/2", "", true},
 		{"/v1/messages", "/api/v1/messages", true},
-		{"/v1/messages/count_tokens", "/api/v1/messages/count_tokens", true},
+		{"/v1/messages/count_tokens", "/openai/messages/count_tokens", true},
 		{"/v1/responses", "/openai/responses", true},
 		{"/v1/responses/resp_1", "/openai/responses/resp_1", true},
 		{"/v1/tools/list", "/api/v1/tools/list", true},
