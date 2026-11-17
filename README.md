@@ -182,6 +182,7 @@ Host chậm (một `/api/models` mất ~20s) không nên bắt client chờ mỗ
 MODEL_CACHE_SECONDS=300          # TTL; 0 = tắt cache
 MODEL_CACHE_REFRESH_SECONDS      # chu kỳ làm mới nền; trống = TTL/2 (khuyến nghị); 0 = tắt hẳn
 PROBE_TIMEOUT_MS=60000           # timeout riêng cho health probe; 0 = dùng UPSTREAM_TIMEOUT_MS
+TRANSLATE_MISSING=1              # bộ chuyển đổi: chạy Responses/Anthropic Messages qua chat completions khi upstream thiếu chuẩn đó
 DEBUG_LOG=1                      # log chẩn đoán: mỗi lời gọi upstream + đoạn thân lỗi (không log khoá/mật khẩu); 0 = tắt
 ```
 
@@ -193,6 +194,21 @@ DEBUG_LOG=1                      # log chẩn đoán: mỗi lời gọi upstream
 - Làm mới nền mặc định **bật** (chu kỳ = TTL/2, sàn 1 giây) — trước đây trống nghĩa là tắt, khiến cache phục vụ danh sách cũ vô hạn.
 - Mỗi acc được làm mới bằng ngân sách timeout riêng của acc đó, nên một host chậm không làm cả vòng quét bị cắt.
 - Admin: `GET/POST/DELETE /api/admin/model-cache`; WebUI có thẻ "Cache mô hình" ở Dashboard.
+
+### Bộ chuyển đổi khi upstream thiếu chuẩn API (`TRANSLATE_MISSING`)
+
+Một số upstream (ví dụ `kaethegpt.duckdns.org`) chỉ có chat completions: `/openai/responses` trả `404 not_found_error`, một số route trả `405`. Bật `TRANSLATE_MISSING=1` rồi khởi động lại, proxy sẽ **tự dịch tại biên** thay vì trả lỗi:
+
+| Client gọi | Proxy chuyển thành | Trả về |
+|---|---|---|
+| `POST /v1/responses` | `POST /api/chat/completions` | object Responses (`output[]`, `output_text`, `function_call`) |
+| `POST /v1/messages` | `POST /api/chat/completions` | object Anthropic Messages (`content[]`, `tool_use`, `usage.input_tokens`) |
+| stream = true | SSE chat → SSE đích | event `response.output_text.delta` / `content_block_delta` + envelope `message_start`/`message_stop` |
+
+- Chuyển đổi **không bao giờ nói dối**: field mà schema chat không chứa được (ví dụ `reasoning`, `thinking`, `store`, `metadata`, `context_management`) được liệt kê trong header `X-Compat-Dropped`, và `X-Compat-Mode` cho biết đang dịch. Không có header thì không dịch.
+- `input` của Responses (string hoặc items) được map sang `messages`; `function_call`/`function_call_output` được replay đúng thứ tự để tool call của client vẫn chạy.
+- Tool "hosted" của Responses (`web_search`, `file_search`, `code_interpreter`…) chạy bên vendor, không thể mang qua chat → trả `400` ngay thay vì âm thầm bỏ tool.
+- Tắt mặc định: chỉ áp dụng cho `/v1/responses` và `/v1/messages`; mọi route khác vẫn passthrough nguyên vẹn.
 
 ### Log chẩn đoán (`DEBUG_LOG`)
 

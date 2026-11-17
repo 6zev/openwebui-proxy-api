@@ -54,6 +54,11 @@ type Config struct {
 	// upstream error body. It never logs credentials: auth headers and the
 	// proxy keys are excluded by construction.
 	DebugLog bool
+	// TranslateMissing adapts requests for upstreams that lack a standard API:
+	// a Responses or Anthropic Messages call is carried over chat completions
+	// when the upstream answers 404/405 for the native route. Off by default so
+	// behaviour never changes silently.
+	TranslateMissing bool
 	// ProbeTimeout overrides Timeout for health probes only; zero means the
 	// regular upstream timeout applies.
 	ProbeTimeout time.Duration
@@ -680,6 +685,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if passThrough {
 		body = applyModelPrefix(p, r, body)
 		p.debugSurfaceBody(r, body, surfaceTarget)
+		if kind, ok := translateTarget(r.URL.Path); ok && p.config.TranslateMissing {
+			p.debugf("debug: %s translated %s -> chat completions", r.URL.Path, kind)
+			p.forwardTranslated(w, r, body, kind)
+			return
+		}
 		p.forwardBody(w, r, body, surfaceTarget)
 		return
 	}

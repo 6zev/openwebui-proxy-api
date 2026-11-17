@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-var Version = "v0.13.0"
+var Version = "v0.14.0"
 
 // loadDotEnv intentionally supports single-line KEY=value, quoted strings and
 // comment lines only. No shell evaluation or variable interpolation is performed.
@@ -108,6 +108,7 @@ func configFromEnv() (Config, error) {
 	c := Config{BaseURL: os.Getenv("OPENWEBUI_URL"), APIKey: os.Getenv("PROXY_API_KEY"), DefaultModel: os.Getenv("DEFAULT_MODEL"), OutboundProxy: os.Getenv("OUTBOUND_PROXY")}
 	c.ModelPrefix = truthy(os.Getenv("MODEL_PREFIX"))
 	c.DebugLog = truthy(os.Getenv("DEBUG_LOG"))
+	c.TranslateMissing = truthy(os.Getenv("TRANSLATE_MISSING"))
 	var err error
 	c.Timeout, err = envDuration("UPSTREAM_TIMEOUT_MS", 300000, time.Millisecond)
 	if err != nil {
@@ -279,6 +280,9 @@ Server configuration is read from environment and .env. See README.md.`)
 	// Mirror the standard logger into the admin console ring buffer. Probe and
 	// rotation lines are useful there too, so it is always attached.
 	log.SetOutput(io.MultiWriter(os.Stderr, debugLogs))
+	if cfg.TranslateMissing {
+		log.Printf("compat translation enabled: Responses and Anthropic Messages calls run over chat completions (dropped fields reported in X-Compat-Dropped)")
+	}
 	if cfg.DebugLog {
 		log.Printf("debug logging enabled: one line per upstream call plus bounded error-body excerpts; credentials are never logged")
 	}
