@@ -191,6 +191,7 @@ DEBUG_LOG=1                      # log chẩn đoán: mỗi lời gọi upstream
 - Cache theo khóa `<website-id>/<account-id>` nên hai web trùng ID acc không lẫn nhau.
 - Response có header `X-Model-Cache: hit|stale|stale-error|miss` và `X-Model-Cache-Age` (giây) để debug.
 - **Hết TTL không bị chặn**: bản cũ được trả ngay với `stale` kèm cờ `X-Model-Cache-Age`, đồng thời một lần fetch nền chạy song song (một fetch cho mỗi acc, các request dồn dập không nhân lên). Request sau nhận `hit`.
+- **Log lỗi refresh được giới hạn**: cùng một acc lỗi (ví dụ mật khẩu bị từ chối) chỉ in **một dòng mỗi 10 phút** kèm `consecutive=N`, và in dòng `recovered` khi hết lỗi — trước đây in mỗi 2,5 phút, một log thật có 195 dòng trùng nhau che hết mọi thứ khác. Xem lỗi hiện tại của acc ở Dashboard → Health.
 - **TTL tự nới cho upstream đắt**: entry giữ lâu bằng `max(TTL, 30 × thời gian fetch)`, chặn trên bởi `MODEL_CACHE_MAX_SECONDS`. Danh sách 21s vì thế không bị gọi lại mỗi 5 phút; danh sách 0.8s vẫn theo TTL gốc.
 - **Upstream lỗi**: danh sách cũ vẫn được phục vụ (`stale-error` + `X-Cache-Error: upstream-failed`) thay vì trả lỗi cho client.
 - Làm mới nền mặc định **bật** (chu kỳ = TTL/2, sàn 1 giây) — trước đây trống nghĩa là tắt, khiến cache phục vụ danh sách cũ vô hạn.
@@ -223,6 +224,10 @@ Bật `DEBUG_LOG=1` rồi khởi động lại. Log đi ra stderr **và** vào v
 - Passthrough (Responses, tools, MCP, embeddings…) in ra danh sách key của body và **cảnh báo** khi gặp field mà `/openai/responses` của Open WebUI hay từ chối: `reasoning`, `include`, `store`, `metadata`, `parallel_tool_calls`, `previous_response_id`, `truncation`, `background`, `top_logprobs`, `tool_choice`, `service_tier`, `max_tool_calls`, `prompt_cache_key`.
 - Không bao giờ log header `Authorization`, khoá proxy hay mật khẩu; body lỗi được lọc ký tự điều khiển trước khi ghi.
 - Tắt mặc định: khi `DEBUG_LOG` không bật, proxy chỉ log lúc khởi động và lỗi nghiêm trọng.
+
+### `debug: model-cache refresh failed ... Open WebUI login failed`
+
+Mật khẩu/email của acc đó đã bị upstream từ chối (đăng nhập lại bằng tay sẽ thấy). Proxy chỉ in một dòng mỗi 10 phút kèm `consecutive=N`; sửa mật khẩu trong WebUI là dòng `recovered` xuất hiện. Đây **không phải** lỗi proxy.
 
 ### `debug: model-cache refresh failed` (connection timed out)
 

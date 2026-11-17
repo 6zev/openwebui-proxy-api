@@ -262,9 +262,41 @@ func (p *Proxy) refreshModelEntry(ctx context.Context, a *account) {
 	started := time.Now()
 	if models, err := p.fetchModelList(fetchCtx, a); err == nil {
 		p.modelCache.putCost(accountKey(a.config.WebsiteID, a.config.ID), models, time.Since(started))
+		p.recordRefreshFailure(a, nil)
 	} else {
-		p.debugf("debug: model-cache refresh failed account=%s website=%s err=%v", a.config.ID, a.config.WebsiteID, err)
+		p.recordRefreshFailure(a, err)
 	}
+}
+
+// refreshFailureEvery rate-limits the repeated "refresh failed" line. A single
+// rejected password used to produce one line every two and a half minutes for
+// hours (195 lines in one log), which buries every other finding.
+const refreshFailureEvery = 10 * time.Minute
+
+// recordRefreshFailure logs a failure at most once per refreshFailureEvery per
+// account, and reports how many consecutive failures it has seen, so a broken
+// account is loud once instead of spamming.
+func (p *Proxy) recordRefreshFailure(a *account, err error) {
+	a.refreshMu.Lock()
+	if err == nil {
+		if a.refreshFailures > 0 {
+			p.debugf("debug: model-cache refresh recovered account=%s website=%s after %d failures", a.config.ID, a.config.WebsiteID, a.refreshFailures)
+		}
+		a.refreshFailures = 0
+		a.refreshLogged = time.Time{}
+		a.refreshMu.Unlock()
+		return
+	}
+	a.refreshFailures++
+	count := a.refreshFailures
+	logged := a.refreshLogged
+	if !logged.IsZero() && time.Since(logged) < refreshFailureEvery {
+		a.refreshMu.Unlock()
+		return
+	}
+	a.refreshLogged = time.Now()
+	a.refreshMu.Unlock()
+	p.debugf("debug: model-cache refresh failed account=%s website=%s consecutive=%d err=%v", a.config.ID, a.config.WebsiteID, count, err)
 }
 
 // accountByKey resolves a "<website-id>/<account-id>" cache key.

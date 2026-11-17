@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -85,6 +88,9 @@ func TestModelCacheServesStaleWhileRefreshing(t *testing.T) {
 	u := slowModelsUpstream(t, 0, &hits)
 	cfg := proxyTestConfig(u, "acc")
 	cfg.ModelCacheTTL = 50 * time.Millisecond
+	// The adaptive rule stretches an expensive entry; use a fixed cache here so
+	// the test measures staleness, not the extension.
+	cfg.DisableAdaptiveCache = true
 	s := newProxyTestServer(t, cfg)
 	requireProxyStatus(t, proxyTestRequest(t, s, http.MethodGet, "/v1/models", "", testProxyKey, ""), 200)
 	time.Sleep(90 * time.Millisecond)
@@ -151,6 +157,7 @@ func TestModelCacheServesStaleOnUpstreamError(t *testing.T) {
 	})
 	cfg := proxyTestConfig(u, "acc")
 	cfg.ModelCacheTTL = 50 * time.Millisecond
+	cfg.DisableAdaptiveCache = true
 	s := newProxyTestServer(t, cfg)
 	requireProxyStatus(t, proxyTestRequest(t, s, http.MethodGet, "/v1/models", "", testProxyKey, ""), 200)
 	broken.Store(true)
@@ -276,5 +283,66 @@ func TestModelCacheFixedTTLUnchanged(t *testing.T) {
 	cache.putCost("w/a", []cachedModel{{ID: "m"}}, 30*time.Second)
 	if got := cache.ttlFor("w/a"); got != 2*time.Minute {
 		t.Errorf("fixed ttl = %s, want 2m", got)
+	}
+}
+
+// A rejected password must be reported once, not on every sweep: one real log had
+// 195 identical "refresh failed" lines that buried everything else.
+func TestRefreshFailureLoggingIsRateLimited(t *testing.T) {
+	var buf bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	p, err := NewProxy(proxyTestConfig(newProxyTestUpstream(t), "alpha"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.config.DebugLog = true
+	account := p.accounts[0]
+	loginErr := errors.New("Open WebUI login failed; check credentials and password-login settings")
+	for i := 0; i < 20; i++ {
+		p.recordRefreshFailure(account, loginErr)
+	}
+	if got := strings.Count(buf.String(), "refresh failed"); got != 1 {
+		t.Errorf("logged %d failures within one window, want 1:\n%s", got, buf.String())
+	}
+	// The single line reports the counter value when it was emitted (1), and the
+	// counter keeps growing silently afterwards.
+	if !strings.Contains(buf.String(), "consecutive=1") {
+		t.Errorf("failure counter missing from the line:\n%s", buf.String())
+	}
+	account.refreshMu.Lock()
+	silent := account.refreshFailures
+	account.refreshMu.Unlock()
+	if silent != 20 {
+		t.Errorf("counter after silent failures = %d, want 20", silent)
+	}
+	// Recovery is reported and resets the counter.
+	p.recordRefreshFailure(account, nil)
+	if !strings.Contains(buf.String(), "recovered") {
+		t.Errorf("recovery not reported:\n%s", buf.String())
+	}
+	account.refreshMu.Lock()
+	failures := account.refreshFailures
+	account.refreshMu.Unlock()
+	if failures != 0 {
+		t.Errorf("counter not reset: %d", failures)
+	}
+}
+
+// MODEL_CACHE_SECONDS=0 disables the cache instead of failing to start.
+func TestModelCacheSecondsZeroDisablesCache(t *testing.T) {
+	t.Setenv("MODEL_CACHE_SECONDS", "0")
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("MODEL_CACHE_SECONDS=0 should be accepted: %v", err)
+	}
+	if cfg.ModelCacheTTL != 0 {
+		t.Errorf("ttl = %v, want 0 (disabled)", cfg.ModelCacheTTL)
+	}
+	t.Setenv("MODEL_CACHE_SECONDS", "-5")
+	if _, err := configFromEnv(); err == nil {
+		t.Error("negative value should still be rejected")
 	}
 }

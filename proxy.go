@@ -67,10 +67,13 @@ type Config struct {
 	ModelCacheTTL time.Duration
 	// ModelCacheMaxTTL caps the adaptive extension for entries whose upstream
 	// takes a long time to answer; zero means TTL×12.
-	ModelCacheMaxTTL  time.Duration
-	Websites          []WebsiteConfig
-	Accounts          []AccountConfig
-	Timeout, Cooldown time.Duration
+	ModelCacheMaxTTL time.Duration
+	// DisableAdaptiveCache keeps every entry on the base TTL. Tests use it to
+	// measure staleness without the cost-based extension.
+	DisableAdaptiveCache bool
+	Websites             []WebsiteConfig
+	Accounts             []AccountConfig
+	Timeout, Cooldown    time.Duration
 }
 type account struct {
 	config AccountConfig
@@ -83,10 +86,15 @@ type account struct {
 	expires      time.Time
 	loginBlocked time.Time
 	// probeMu serialises operator-triggered probes for this account.
-	probeMu       sync.Mutex
-	cooldownMu    sync.Mutex
-	cooldownUntil time.Time
-	health        accountHealth
+	probeMu sync.Mutex
+	// refreshMu guards the background model-cache refresh bookkeeping, so a
+	// permanently broken account is reported once instead of on every sweep.
+	refreshMu       sync.Mutex
+	refreshFailures int
+	refreshLogged   time.Time
+	cooldownMu      sync.Mutex
+	cooldownUntil   time.Time
+	health          accountHealth
 }
 type Proxy struct {
 	config        Config
@@ -175,6 +183,9 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 	p := &Proxy{config: c, key: sha256.Sum256([]byte(c.APIKey)), sites: make(map[string]WebsiteConfig), nextByWebsite: make(map[string]int)}
 	if c.ModelCacheTTL > 0 {
 		p.modelCache = newAdaptiveModelCache(c.ModelCacheTTL, c.ModelCacheMaxTTL)
+		if c.DisableAdaptiveCache {
+			p.modelCache.adaptive = false
+		}
 	}
 	for _, s := range c.Websites {
 		if !validConfigID(s.ID) {
@@ -776,6 +787,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	started := time.Now()
 	var response *http.Response
 	selectedPrefix := ""
 	for _, a := range candidates {
@@ -872,7 +884,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cached = append(cached, cachedModel{ID: m.ID, Created: m.Created, OwnedBy: m.OwnedBy})
 		}
 		if p.modelCache != nil {
-			p.modelCache.put(modelCacheKeyFor(candidates), cached)
+			// Record what this fetch cost, so an expensive upstream is not
+			// re-queried on the base TTL (a 21s list re-fetched every 5 minutes).
+			p.modelCache.putCost(modelCacheKeyFor(candidates), cached, time.Since(started))
 			w.Header().Set("X-Model-Cache", "miss")
 		}
 		writeModelList(w, cached, selectedPrefix)

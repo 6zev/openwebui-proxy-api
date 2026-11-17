@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-var Version = "v0.18.0"
+var Version = "v0.19.0"
 
 // loadDotEnv intentionally supports single-line KEY=value, quoted strings and
 // comment lines only. No shell evaluation or variable interpolation is performed.
@@ -93,6 +93,20 @@ func truthy(raw string) bool {
 	return false
 }
 
+// envDurationAllowZero is envDuration for settings where 0 is meaningful
+// ("disable this feature"), not a mistake.
+func envDurationAllowZero(key string, def int64, unit time.Duration) (time.Duration, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return time.Duration(def) * unit, nil
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || n < 0 || n > int64((1<<63-1)/unit) {
+		return 0, fmt.Errorf("%s must be zero or a positive duration", key)
+	}
+	return time.Duration(n) * unit, nil
+}
+
 func envDuration(key string, def int64, unit time.Duration) (time.Duration, error) {
 	raw := os.Getenv(key)
 	if raw == "" {
@@ -118,7 +132,7 @@ func configFromEnv() (Config, error) {
 	if err != nil {
 		return c, err
 	}
-	c.ModelCacheTTL, err = envDuration("MODEL_CACHE_SECONDS", 300, time.Second)
+	c.ModelCacheTTL, err = envDurationAllowZero("MODEL_CACHE_SECONDS", 300, time.Second)
 	if err != nil {
 		return c, err
 	}
