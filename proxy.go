@@ -64,7 +64,10 @@ type Config struct {
 	ProbeTimeout time.Duration
 	// ModelCacheTTL keeps successful model listings for this long; zero disables
 	// the cache entirely.
-	ModelCacheTTL     time.Duration
+	ModelCacheTTL time.Duration
+	// ModelCacheMaxTTL caps the adaptive extension for entries whose upstream
+	// takes a long time to answer; zero means TTL×12.
+	ModelCacheMaxTTL  time.Duration
 	Websites          []WebsiteConfig
 	Accounts          []AccountConfig
 	Timeout, Cooldown time.Duration
@@ -171,7 +174,7 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 	c.Accounts = append([]AccountConfig{}, c.Accounts...)
 	p := &Proxy{config: c, key: sha256.Sum256([]byte(c.APIKey)), sites: make(map[string]WebsiteConfig), nextByWebsite: make(map[string]int)}
 	if c.ModelCacheTTL > 0 {
-		p.modelCache = newModelCache(c.ModelCacheTTL)
+		p.modelCache = newAdaptiveModelCache(c.ModelCacheTTL, c.ModelCacheMaxTTL)
 	}
 	for _, s := range c.Websites {
 		if !validConfigID(s.ID) {

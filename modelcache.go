@@ -24,6 +24,9 @@ type modelCacheEntry struct {
 	// refreshing marks an in-flight background fetch so a burst of callers
 	// triggers one upstream call instead of one per request.
 	refreshing bool
+	// lastCost is how long the last successful fetch took, used to keep an
+	// expensive list cached longer.
+	lastCost time.Duration
 }
 
 type cachedModel struct {
@@ -36,10 +39,59 @@ type modelCache struct {
 	mu      sync.Mutex
 	entries map[string]*modelCacheEntry
 	ttl     time.Duration
+	// adaptive extends the TTL of an account whose upstream is expensive to
+	// query: re-fetching a 21s model list every 5 minutes is pure waste, and the
+	// list rarely changes. Up to maxTTL.
+	adaptive bool
+	maxTTL   time.Duration
+}
+
+// adaptiveFactorMultiplier stretches an entry's lifetime to at least this many
+// times the time the upstream took to produce it. A 21s list therefore stays for
+// a few minutes of its own, while a cheap list still respects the base TTL as a
+// floor: the rule is "at least K times the cost, never less than the TTL".
+const adaptiveFactorMultiplier = 30
+
+// ttlFor reports the effective TTL for one key. An entry that took long to fetch
+// keeps its list proportionally longer (10× the fetch cost, capped), so slow
+// upstreams stop paying their cost on a fixed schedule.
+func (c *modelCache) ttlFor(key string) time.Duration {
+	if c == nil || !c.adaptive {
+		if c == nil {
+			return 0
+		}
+		return c.ttl
+	}
+	entry := c.entry(key)
+	entry.mu.Lock()
+	cost := entry.lastCost
+	entry.mu.Unlock()
+	if cost <= 0 {
+		return c.ttl
+	}
+	// time.Duration counts nanoseconds, so the multiplier has to be a Duration
+	// too: cost*10 is ten nanoseconds, not ten times the cost.
+	scaled := cost * adaptiveFactorMultiplier
+	if scaled < c.ttl {
+		scaled = c.ttl
+	}
+	if c.maxTTL > 0 && scaled > c.maxTTL {
+		scaled = c.maxTTL
+	}
+	return scaled
 }
 
 func newModelCache(ttl time.Duration) *modelCache {
 	return &modelCache{entries: make(map[string]*modelCacheEntry), ttl: ttl}
+}
+
+// newAdaptiveModelCache extends entries that were expensive to fetch. maxTTL
+// caps the extension; zero means no cap.
+func newAdaptiveModelCache(ttl, maxTTL time.Duration) *modelCache {
+	cache := newModelCache(ttl)
+	cache.adaptive = true
+	cache.maxTTL = maxTTL
+	return cache
 }
 
 func (c *modelCache) entry(key string) *modelCacheEntry {
@@ -106,16 +158,33 @@ func (c *modelCache) peek(key string) ([]cachedModel, time.Time, bool) {
 	return entry.models, entry.fetchedAt, true
 }
 
-func (c *modelCache) put(key string, models []cachedModel) {
+func (c *modelCache) put(key string, models []cachedModel) { c.putCost(key, models, 0) }
+
+// putCost stores a list together with the time it took to fetch it, and sizes
+// the entry's lifetime from that cost when adaptation is on.
+func (c *modelCache) putCost(key string, models []cachedModel, cost time.Duration) {
 	if c == nil {
 		return
 	}
 	entry := c.entry(key)
+	ttl := c.ttl
+	if c.adaptive && cost > 0 {
+		ttl = cost * adaptiveFactorMultiplier
+		if ttl < c.ttl {
+			ttl = c.ttl
+		}
+		if c.maxTTL > 0 && ttl > c.maxTTL {
+			ttl = c.maxTTL
+		}
+	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
+	if cost > 0 {
+		entry.lastCost = cost
+	}
 	entry.models = models
 	entry.fetchedAt = time.Now()
-	entry.expiresAt = entry.fetchedAt.Add(c.ttl)
+	entry.expiresAt = entry.fetchedAt.Add(ttl)
 }
 
 func (c *modelCache) drop(key string) {
@@ -158,6 +227,7 @@ func (c *modelCache) describe(key string) (map[string]any, bool) {
 		"models":      len(entry.models),
 		"age_seconds": int(age / time.Second),
 		"ttl_seconds": int(c.ttl / time.Second),
+		"cost_ms":     int(entry.lastCost / time.Millisecond),
 		"expired":     time.Now().After(entry.expiresAt),
 		"refreshing":  entry.refreshing,
 	}, true
@@ -189,8 +259,9 @@ func (p *Proxy) refreshModelEntry(ctx context.Context, a *account) {
 	defer p.modelCache.endRefresh(entry)
 	fetchCtx, cancel := context.WithTimeout(ctx, p.probeTimeoutFor(a))
 	defer cancel()
+	started := time.Now()
 	if models, err := p.fetchModelList(fetchCtx, a); err == nil {
-		p.modelCache.put(accountKey(a.config.WebsiteID, a.config.ID), models)
+		p.modelCache.putCost(accountKey(a.config.WebsiteID, a.config.ID), models, time.Since(started))
 	} else {
 		p.debugf("debug: model-cache refresh failed account=%s website=%s err=%v", a.config.ID, a.config.WebsiteID, err)
 	}

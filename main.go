@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-var Version = "v0.17.0"
+var Version = "v0.18.0"
 
 // loadDotEnv intentionally supports single-line KEY=value, quoted strings and
 // comment lines only. No shell evaluation or variable interpolation is performed.
@@ -119,6 +119,10 @@ func configFromEnv() (Config, error) {
 		return c, err
 	}
 	c.ModelCacheTTL, err = envDuration("MODEL_CACHE_SECONDS", 300, time.Second)
+	if err != nil {
+		return c, err
+	}
+	c.ModelCacheMaxTTL, err = envDuration("MODEL_CACHE_MAX_SECONDS", int64(12*c.ModelCacheTTL/time.Second), time.Second)
 	if err != nil {
 		return c, err
 	}

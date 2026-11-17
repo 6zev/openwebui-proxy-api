@@ -245,3 +245,36 @@ func indexOf(s, sub string) int {
 }
 
 var _ = httptest.NewServer
+
+// A list that took 21s to fetch must not be re-fetched every 5 minutes: the TTL
+// grows with the cost of fetching it, capped by MODEL_CACHE_MAX_SECONDS.
+func TestAdaptiveModelCacheExtendsExpensiveEntries(t *testing.T) {
+	cache := newAdaptiveModelCache(5*time.Minute, time.Hour)
+	cache.putCost("w/a", []cachedModel{{ID: "m"}}, 21*time.Second)
+	if got := cache.ttlFor("w/a"); got != 630*time.Second {
+		t.Errorf("adaptive ttl = %s, want 630s (30x the 21s cost)", got)
+	}
+	// A cheap list keeps the base TTL.
+	cache.putCost("w/b", []cachedModel{{ID: "m"}}, 800*time.Millisecond)
+	if got := cache.ttlFor("w/b"); got != 5*time.Minute {
+		t.Errorf("cheap ttl = %s, want the base ttl", got)
+	}
+	// The extension is capped by MODEL_CACHE_MAX_SECONDS.
+	cache.putCost("w/c", []cachedModel{{ID: "m"}}, 40*time.Second) // 40s x 30 = 20m, under the cap
+	if got := cache.ttlFor("w/c"); got != 20*time.Minute {
+		t.Errorf("scaled ttl = %s, want 20m", got)
+	}
+	cache.putCost("w/d", []cachedModel{{ID: "m"}}, 5*time.Minute) // 5m x 30 = 2h30m -> capped
+	if got := cache.ttlFor("w/d"); got != time.Hour {
+		t.Errorf("capped ttl = %s, want 1h", got)
+	}
+}
+
+// Without adaptation the TTL stays exactly as configured.
+func TestModelCacheFixedTTLUnchanged(t *testing.T) {
+	cache := newModelCache(2 * time.Minute)
+	cache.putCost("w/a", []cachedModel{{ID: "m"}}, 30*time.Second)
+	if got := cache.ttlFor("w/a"); got != 2*time.Minute {
+		t.Errorf("fixed ttl = %s, want 2m", got)
+	}
+}

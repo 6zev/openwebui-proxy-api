@@ -181,6 +181,7 @@ Host chậm (một `/api/models` mất ~20s) không nên bắt client chờ mỗ
 ```dotenv
 MODEL_CACHE_SECONDS=300          # TTL; 0 = tắt cache
 MODEL_CACHE_REFRESH_SECONDS      # chu kỳ làm mới nền; trống = TTL/2 (khuyến nghị); 0 = tắt hẳn
+MODEL_CACHE_MAX_SECONDS=3600     # trần cho TTL tự nới; trống = MODEL_CACHE_SECONDS x 12
 PROBE_TIMEOUT_MS=60000           # timeout riêng cho health probe; 0 = dùng UPSTREAM_TIMEOUT_MS
 TRANSLATE_MISSING=1              # bộ chuyển đổi: chạy Responses/Anthropic Messages qua chat completions khi upstream thiếu chuẩn đó
 DEBUG_LOG=1                      # log chẩn đoán: mỗi lời gọi upstream + đoạn thân lỗi (không log khoá/mật khẩu); 0 = tắt
@@ -190,6 +191,7 @@ DEBUG_LOG=1                      # log chẩn đoán: mỗi lời gọi upstream
 - Cache theo khóa `<website-id>/<account-id>` nên hai web trùng ID acc không lẫn nhau.
 - Response có header `X-Model-Cache: hit|stale|stale-error|miss` và `X-Model-Cache-Age` (giây) để debug.
 - **Hết TTL không bị chặn**: bản cũ được trả ngay với `stale` kèm cờ `X-Model-Cache-Age`, đồng thời một lần fetch nền chạy song song (một fetch cho mỗi acc, các request dồn dập không nhân lên). Request sau nhận `hit`.
+- **TTL tự nới cho upstream đắt**: entry giữ lâu bằng `max(TTL, 30 × thời gian fetch)`, chặn trên bởi `MODEL_CACHE_MAX_SECONDS`. Danh sách 21s vì thế không bị gọi lại mỗi 5 phút; danh sách 0.8s vẫn theo TTL gốc.
 - **Upstream lỗi**: danh sách cũ vẫn được phục vụ (`stale-error` + `X-Cache-Error: upstream-failed`) thay vì trả lỗi cho client.
 - Làm mới nền mặc định **bật** (chu kỳ = TTL/2, sàn 1 giây) — trước đây trống nghĩa là tắt, khiến cache phục vụ danh sách cũ vô hạn.
 - Mỗi acc được làm mới bằng ngân sách timeout riêng của acc đó, nên một host chậm không làm cả vòng quét bị cắt.
