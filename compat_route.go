@@ -133,41 +133,40 @@ func translateStream(w http.ResponseWriter, response *http.Response, kind surfac
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
 	_ = rc.Flush()
-	if kind == surfaceAnthropic {
-		// Anthropic clients expect the message_start/content_block_start envelope.
-		_, _ = w.Write(sseEvent("message_start", map[string]any{
-			"type": "message_start",
-			"message": map[string]any{
-				"id": "msg_compat", "type": "message", "role": "assistant", "model": model,
-				"content": []any{}, "stop_reason": nil, "usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
-			},
-		}))
-		_, _ = w.Write(sseEvent("content_block_start", map[string]any{
-			"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""},
-		}))
+	state, opening := newStreamState(kind, model)
+	for _, event := range opening {
+		if _, err := w.Write(event); err != nil {
+			return
+		}
+	}
+	_ = rc.Flush()
+	finished := false
+	write := func(events [][]byte) error {
+		for _, event := range events {
+			if _, err := w.Write(event); err != nil {
+				return err
+			}
+		}
+		return rc.Flush()
 	}
 	err := splitSSEEvents(response.Body, func(event []byte) error {
-		chunks, done, convErr := convertChatStream(kind, model, event)
+		chunks, done, convErr := state.convertChatStream(event)
 		if convErr != nil {
 			return convErr
 		}
-		for _, chunk := range chunks {
-			if _, writeErr := w.Write(chunk); writeErr != nil {
-				return writeErr
-			}
+		if err := write(chunks); err != nil {
+			return err
 		}
-		_ = rc.Flush()
-		if done {
-			return nil
+		if done && !finished {
+			finished = true
+			// The upstream sent [DONE] before a finish_reason; close the message
+			// anyway so the client is not left waiting on a terminal event.
+			return write(state.finalEvents("stop"))
 		}
 		return nil
 	})
 	if err != nil {
 		panic(http.ErrAbortHandler)
-	}
-	if kind == surfaceAnthropic {
-		_, _ = w.Write(sseEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0}))
-		_, _ = w.Write(sseEvent("message_stop", map[string]any{"type": "message_stop"}))
 	}
 	_ = rc.Flush()
 }

@@ -564,72 +564,293 @@ func responsesTools(raw json.RawMessage) ([]map[string]any, error) {
 // Streaming translation: chat completions SSE -> Responses SSE / Anthropic SSE
 // ---------------------------------------------------------------------------
 
-// convertChatStream rewrites an SSE stream produced by chat completions into the
-// event shape the caller asked for. The function returns the [DONE] sentinel
-// plus the body written for each chat event.
-func convertChatStream(target surfaceKind, model string, chatEvent []byte) ([][]byte, bool, error) {
-	if bytes.Equal(bytes.TrimSpace(chatEvent), []byte("[DONE]")) {
+// streamState carries what the translation needs across events: which content
+// block is open, which tool call is being streamed, and the token usage the
+// final event must report.
+//
+// A chat completion streams all text first, then one tool call per stream with a
+// stable index. Anthropic instead interleaves blocks, so a text block has to be
+// closed before a tool_use block opens; each tool call gets its own block and its
+// JSON arguments are forwarded as input_json_delta. Without this a client that
+// dispatches tools sees malformed calls or loses every call but the first.
+type streamState struct {
+	target    surfaceKind
+	model     string
+	messageID string
+	textOpen  bool
+	nextBlock int
+	tools     map[int]*toolBlockState
+	done      bool
+	promptTok int
+	compleTok int
+	totalTok  int
+	createdAt int64
+}
+
+type toolBlockState struct {
+	block   int    // Anthropic content block index
+	id      string // tool call id, as the client must echo it back
+	name    string
+	started bool // content_block_start already emitted
+}
+
+// chatStreamChunk is the subset of a chat completion SSE chunk this layer reads.
+type chatStreamChunk struct {
+	ID      string `json:"id"`
+	Created int64  `json:"created"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Delta struct {
+			Content   string           `json:"content"`
+			ToolCalls []streamToolCall `json:"tool_calls"`
+		} `json:"delta"`
+		Message struct {
+			ToolCalls []streamToolCall `json:"tool_calls"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+// streamToolCall keeps the index openai streams per tool call; id and name are
+// usually only present on the first fragment.
+type streamToolCall struct {
+	Index    *int   `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// newStreamState seeds the state and emits the opening events for Anthropic,
+// whose clients wait for message_start/content_block_start before any delta.
+func newStreamState(target surfaceKind, model string) (*streamState, [][]byte) {
+	st := &streamState{target: target, model: model, tools: make(map[int]*toolBlockState)}
+	if target == surfaceAnthropic {
+		opening := [][]byte{sseEvent("message_start", map[string]any{
+			"type": "message_start",
+			"message": map[string]any{
+				"id": "msg_compat", "type": "message", "role": "assistant", "model": model,
+				"content": []any{}, "stop_reason": nil,
+				"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
+			},
+		})}
+		return st, opening
+	}
+	return st, nil
+}
+
+// openTextBlock emits content_block_start for the text block, once.
+func (st *streamState) openTextBlock() [][]byte {
+	if st.textOpen {
+		return nil
+	}
+	st.textOpen = true
+	st.nextBlock = 1
+	return [][]byte{sseEvent("content_block_start", map[string]any{
+		"type": "content_block_start", "index": 0,
+		"content_block": map[string]any{"type": "text", "text": ""},
+	})}
+}
+
+// convertChatStream translates one chat completion event into zero or more
+// events in the caller's dialect.
+func (st *streamState) convertChatStream(chatEvent []byte) ([][]byte, bool, error) {
+	trimmed := bytes.TrimSpace(chatEvent)
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		st.done = true
 		return nil, true, nil
 	}
-	var chunk struct {
-		ID      string `json:"id"`
-		Choices []struct {
-			Delta struct {
-				Content   string         `json:"content"`
-				ToolCalls []chatToolCall `json:"tool_calls"`
-			} `json:"delta"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
+	var chunk chatStreamChunk
+	if err := json.Unmarshal(trimmed, &chunk); err != nil {
+		return nil, false, nil // comments and keep-alives carry nothing to translate
 	}
-	if err := json.Unmarshal(chatEvent, &chunk); err != nil {
-		return nil, false, nil // A non-JSON comment or heartbeat passes through unchanged.
+	if chunk.ID != "" && st.messageID == "" {
+		st.messageID = chunk.ID
+	}
+	if chunk.Created != 0 && st.createdAt == 0 {
+		st.createdAt = chunk.Created
+	}
+	if chunk.Usage != nil {
+		// Reported on the final chunk, or its own chunk when the client asked
+		// for stream_options.include_usage.
+		st.promptTok = chunk.Usage.PromptTokens
+		st.compleTok = chunk.Usage.CompletionTokens
+		st.totalTok = chunk.Usage.TotalTokens
 	}
 	var out [][]byte
-	switch target {
-	case surfaceAnthropic:
-		if len(chunk.Choices) == 0 {
-			return nil, false, nil
+	// Non-choices chunks (pure usage report) still have to advance nothing.
+	if len(chunk.Choices) > 0 {
+		choice := chunk.Choices[0]
+		delta := choice.Delta
+		for _, call := range delta.ToolCalls {
+			out = append(out, st.toolDeltas(call)...)
 		}
-		delta := chunk.Choices[0].Delta
 		if delta.Content != "" {
-			out = append(out, sseEvent("content_block_delta", map[string]any{
-				"type": "content_block_delta", "index": 0,
-				"delta": map[string]any{"type": "text_delta", "text": delta.Content},
-			}))
-		}
-		if chunk.Choices[0].FinishReason != "" {
-			reason := "end_turn"
-			if chunk.Choices[0].FinishReason == "length" {
-				reason = "max_tokens"
+			switch st.target {
+			case surfaceAnthropic:
+				out = append(out, st.openTextBlock()...)
+				out = append(out, sseEvent("content_block_delta", map[string]any{
+					"type": "content_block_delta", "index": 0,
+					"delta": map[string]any{"type": "text_delta", "text": delta.Content},
+				}))
+			case surfaceResponses:
+				out = append(out, sseEvent("response.output_text.delta", map[string]any{
+					"type": "response.output_text.delta", "item_id": st.messageID, "output_index": 0,
+					"content_index": 0, "delta": delta.Content,
+				}))
 			}
-			if chunk.Choices[0].FinishReason == "tool_calls" {
-				reason = "tool_use"
+		}
+		if choice.FinishReason != "" {
+			// Some upstreams only send the whole answer in message.tool_calls.
+			for _, call := range choice.Message.ToolCalls {
+				out = append(out, st.toolDeltas(call)...)
 			}
-			out = append(out, sseEvent("message_delta", map[string]any{
-				"type":  "message_delta",
-				"delta": map[string]any{"stop_reason": reason, "stop_sequence": nil},
-				"usage": map[string]any{"output_tokens": 0},
-			}))
-		}
-	case surfaceResponses:
-		if len(chunk.Choices) == 0 {
-			return nil, false, nil
-		}
-		delta := chunk.Choices[0].Delta
-		if delta.Content != "" {
-			out = append(out, sseEvent("response.output_text.delta", map[string]any{
-				"type": "response.output_text.delta", "item_id": chunk.ID, "output_index": 0,
-				"content_index": 0, "delta": delta.Content,
-			}))
-		}
-		if chunk.Choices[0].FinishReason != "" {
-			out = append(out, sseEvent("response.completed", map[string]any{
-				"type":     "response.completed",
-				"response": map[string]any{"id": chunk.ID, "object": "response", "status": "completed", "model": model},
-			}))
+			out = append(out, st.finalEvents(choice.FinishReason)...)
 		}
 	}
-	return out, false, nil
+	return out, st.done, nil
+}
+
+// toolDeltas turns one streamed tool-call fragment into the Anthropic events that
+// start and feed a tool_use block. The openai call index decides the block, so
+// parallel tool calls stay separate even when ids arrive later.
+func (st *streamState) toolDeltas(call streamToolCall) [][]byte {
+	index := 0
+	if call.Index != nil {
+		index = *call.Index
+	}
+	if st.target != surfaceAnthropic {
+		// The Responses dialect reports tool calls as completed items; streaming
+		// arguments are collected by the client.
+		return nil
+	}
+	var out [][]byte
+	state, ok := st.tools[index]
+	if !ok {
+		// A new tool call closes the text block first: Anthropic blocks cannot
+		// interleave, so text must end before tool_use begins.
+		if st.textOpen {
+			out = append(out, sseEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0}))
+			st.textOpen = false
+		}
+		state = &toolBlockState{block: st.nextBlock}
+		st.nextBlock++
+		st.tools[index] = state
+	}
+	if state.id == "" && call.ID != "" {
+		state.id = call.ID
+	}
+	if state.name == "" && call.Function.Name != "" {
+		state.name = call.Function.Name
+	}
+	if !state.started && (state.name != "" || state.id != "") {
+		id := state.id
+		if id == "" {
+			// A client still needs an id to echo back; derive a stable one.
+			id = "toolu_compat_" + itoa(index)
+		}
+		out = append(out, sseEvent("content_block_start", map[string]any{
+			"type": "content_block_start", "index": state.block,
+			"content_block": map[string]any{"type": "tool_use", "id": id, "name": state.name, "input": map[string]any{}},
+		}))
+		state.started = true
+	}
+	if state.started && call.Function.Arguments != "" {
+		out = append(out, sseEvent("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": state.block,
+			"delta": map[string]any{"type": "input_json_delta", "partial_json": call.Function.Arguments},
+		}))
+	}
+	return out
+}
+
+// itoa is strconv.Itoa for the one place this file needs it, keeping the import
+// list to encoding/json and friends.
+func itoa(value int) string {
+	if value == 0 {
+		return "0"
+	}
+	var digits [20]byte
+	pos := len(digits)
+	negative := value < 0
+	if negative {
+		value = -value
+	}
+	for value > 0 {
+		pos--
+		digits[pos] = byte('0' + value%10)
+		value /= 10
+	}
+	if negative {
+		pos--
+		digits[pos] = '-'
+	}
+	return string(digits[pos:])
+}
+
+// finalEvents closes every open block and reports the real token usage.
+func (st *streamState) finalEvents(finishReason string) [][]byte {
+	var out [][]byte
+	if st.target == surfaceAnthropic {
+		if st.textOpen {
+			out = append(out, sseEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0}))
+			st.textOpen = false
+		}
+		// Close tool blocks in the order they opened.
+		blocks := make([]int, 0, len(st.tools))
+		for _, state := range st.tools {
+			blocks = append(blocks, state.block)
+		}
+		sortInts(blocks)
+		for _, block := range blocks {
+			out = append(out, sseEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": block}))
+		}
+		stop := "end_turn"
+		switch finishReason {
+		case "length":
+			stop = "max_tokens"
+		case "tool_calls", "function_call":
+			stop = "tool_use"
+		}
+		out = append(out, sseEvent("message_delta", map[string]any{
+			"type":  "message_delta",
+			"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
+			"usage": map[string]any{"input_tokens": st.promptTok, "output_tokens": st.compleTok},
+		}))
+		out = append(out, sseEvent("message_stop", map[string]any{"type": "message_stop"}))
+		return out
+	}
+	// Responses: report the aggregated usage on the terminal event.
+	status := "completed"
+	if finishReason == "length" {
+		status = "incomplete"
+	}
+	out = append(out, sseEvent("response.completed", map[string]any{
+		"type": "response.completed",
+		"response": map[string]any{
+			"id": st.messageID, "object": "response", "status": status, "model": st.model,
+			"created_at": st.createdAt,
+			"usage": map[string]any{
+				"input_tokens": st.promptTok, "output_tokens": st.compleTok, "total_tokens": st.totalTok,
+			},
+		},
+	}))
+	return out
+}
+
+func sortInts(items []int) {
+	for i := 1; i < len(items); i++ {
+		for j := i; j > 0 && items[j] < items[j-1]; j-- {
+			items[j], items[j-1] = items[j-1], items[j]
+		}
+	}
 }
 
 // sseEvent renders one server-sent event with a JSON payload.

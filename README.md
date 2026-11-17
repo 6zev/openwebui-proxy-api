@@ -210,6 +210,8 @@ Một số upstream (ví dụ `kaethegpt.duckdns.org`) chỉ có chat completion
 - Tool "hosted" của Responses (`web_search`, `file_search`, `code_interpreter`…) chạy bên vendor, không thể mang qua chat → trả `400` ngay thay vì âm thầm bỏ tool.
 - Tắt mặc định: chỉ áp dụng cho `/v1/responses` và `/v1/messages`; mọi route khác vẫn passthrough nguyên vẹn.
 
+**Giới hạn còn lại**: hosted tool của Responses (`web_search`…) trả `400`; reasoning/thinking không được replay (báo trong `X-Compat-Dropped`).
+
 ### Log chẩn đoán (`DEBUG_LOG`)
 
 Bật `DEBUG_LOG=1` rồi khởi động lại. Log đi ra stderr **và** vào vòng đệm 300 dòng xem được ở Dashboard → thẻ “Log chẩn đoán” (API `GET /api/admin/logs`), không cần shell trên host.
