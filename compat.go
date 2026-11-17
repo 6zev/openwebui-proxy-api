@@ -596,6 +596,9 @@ type toolBlockState struct {
 	id      string // tool call id, as the client must echo it back
 	name    string
 	started bool // content_block_start already emitted
+	// arguments accumulates the streamed JSON so the terminal Responses payload
+	// can carry a finished function_call item.
+	arguments strings.Builder
 }
 
 // chatStreamChunk is the subset of a chat completion SSE chunk this layer reads.
@@ -770,8 +773,19 @@ func (st *streamState) toolDeltas(call streamToolCall) [][]byte {
 		index = *call.Index
 	}
 	if st.target != surfaceAnthropic {
-		// The Responses dialect reports tool calls as completed items; streaming
-		// arguments are collected by the client.
+		// The Responses dialect reports tool calls as completed items, but the
+		// fragments still have to be recorded: the terminal payload must carry
+		// the finished function_call or the client sees no tool call at all.
+		state := st.toolState(index)
+		if state.id == "" && call.ID != "" {
+			state.id = call.ID
+		}
+		if state.name == "" && call.Function.Name != "" {
+			state.name = call.Function.Name
+		}
+		if call.Function.Arguments != "" {
+			state.arguments.WriteString(call.Function.Arguments)
+		}
 		return nil
 	}
 	var out [][]byte
@@ -804,6 +818,9 @@ func (st *streamState) toolDeltas(call streamToolCall) [][]byte {
 			"content_block": map[string]any{"type": "tool_use", "id": id, "name": state.name, "input": map[string]any{}},
 		}))
 		state.started = true
+	}
+	if call.Function.Arguments != "" {
+		state.arguments.WriteString(call.Function.Arguments)
 	}
 	if state.started && call.Function.Arguments != "" {
 		out = append(out, sseEvent("content_block_delta", map[string]any{
@@ -872,6 +889,7 @@ func (st *streamState) finalEvents(finishReason string) [][]byte {
 	}
 	// Responses: close the item and its content part, then report the real
 	// usage on the terminal event.
+	var completedOutput []map[string]any
 	if st.itemOpen {
 		st.textOpen = false
 		out = append(out, sseEvent("response.output_text.done", map[string]any{
@@ -882,29 +900,73 @@ func (st *streamState) finalEvents(finishReason string) [][]byte {
 			"type": "response.content_part.done", "item_id": st.itemID(0), "output_index": 0, "content_index": 0,
 			"part": map[string]any{"type": "output_text", "text": st.textBuf.String(), "annotations": []any{}},
 		}))
+		finalItem := map[string]any{
+			"type": "message", "id": st.itemID(0), "role": "assistant", "status": "completed",
+			"content": []map[string]any{{"type": "output_text", "text": st.textBuf.String(), "annotations": []any{}}},
+		}
 		out = append(out, sseEvent("response.output_item.done", map[string]any{
-			"type": "response.output_item.done", "output_index": 0,
-			"item": map[string]any{
-				"type": "message", "id": st.itemID(0), "role": "assistant", "status": "completed",
-				"content": []map[string]any{{"type": "output_text", "text": st.textBuf.String(), "annotations": []any{}}},
-			},
+			"type": "response.output_item.done", "output_index": 0, "item": finalItem,
 		}))
+		completedOutput = append(completedOutput, finalItem)
 		st.itemOpen = false
+	}
+	for _, block := range st.sortedTools() {
+		arguments := block.arguments.String()
+		if strings.TrimSpace(arguments) == "" {
+			arguments = "{}"
+		}
+		id := block.id
+		if id == "" {
+			id = "call_compat_" + itoa(block.block)
+		}
+		completedOutput = append(completedOutput, map[string]any{
+			"type": "function_call", "id": id, "call_id": id,
+			"name": block.name, "arguments": arguments, "status": "completed",
+		})
 	}
 	status := "completed"
 	if finishReason == "length" {
 		status = "incomplete"
 	}
+	if completedOutput == nil {
+		completedOutput = []map[string]any{}
+	}
 	out = append(out, sseEvent("response.completed", map[string]any{
 		"type": "response.completed",
 		"response": map[string]any{
 			"id": st.messageID, "object": "response", "status": status, "model": st.model,
-			"created_at": st.createdAt,
+			"created_at": st.createdAt, "output": completedOutput,
 			"usage": map[string]any{
 				"input_tokens": st.promptTok, "output_tokens": st.compleTok, "total_tokens": st.totalTok,
 			},
 		},
 	}))
+	return out
+}
+
+// toolState returns the tracked state for one openai call index, creating it if
+// this is the first fragment seen.
+func (st *streamState) toolState(index int) *toolBlockState {
+	if state, ok := st.tools[index]; ok {
+		return state
+	}
+	state := &toolBlockState{block: st.nextBlock}
+	st.nextBlock++
+	st.tools[index] = state
+	return state
+}
+
+// sortedTools returns the tool blocks in the order they opened.
+func (st *streamState) sortedTools() []*toolBlockState {
+	indexes := make([]int, 0, len(st.tools))
+	for index := range st.tools {
+		indexes = append(indexes, index)
+	}
+	sortInts(indexes)
+	out := make([]*toolBlockState, 0, len(indexes))
+	for _, index := range indexes {
+		out = append(out, st.tools[index])
+	}
 	return out
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -139,5 +140,65 @@ func TestResponsesStreamEnvelopeAndSingleTerminal(t *testing.T) {
 	// The terminal event must be last.
 	if !strings.HasSuffix(strings.TrimSpace(all), "}") || strings.LastIndex(all, "response.completed") < strings.LastIndex(all, "output_item.done") {
 		t.Errorf("response.completed is not final:\n%s", all)
+	}
+}
+
+// The client that started this work (smallmain/vscode-unify-chat-provider)
+// throws RESPONSES_NO_CONSUMABLE_OUTPUT_ERROR unless response.completed carries
+// output items, and re-emits text from that payload. A stream with text only in
+// deltas is therefore treated as an empty answer and retried.
+func TestResponsesCompletedCarriesOutputItems(t *testing.T) {
+	state, _ := newStreamState(surfaceResponses, "gpt")
+	var all strings.Builder
+	feed := func(payload string) {
+		out, _, err := state.convertChatStream([]byte(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range out {
+			all.Write(event)
+		}
+	}
+	feed(`{"id":"c1","choices":[{"delta":{"content":"done"}}]}`)
+	feed(`{"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"lookup","arguments":"{\"q\":1}"}}]}}]}`)
+	feed(`{"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`)
+
+	raw := all.String()
+	marker := "event: response.completed\ndata: "
+	startIndex := strings.LastIndex(raw, marker)
+	if startIndex < 0 {
+		t.Fatalf("no response.completed event:\n%s", raw)
+	}
+	body := raw[startIndex+len(marker):]
+	if end := strings.Index(body, "\n\n"); end >= 0 {
+		body = body[:end]
+	}
+	var payload struct {
+		Response struct {
+			Output []struct {
+				Type      string `json:"type"`
+				CallID    string `json:"call_id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+				Content   []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"output"`
+		} `json:"response"`
+	}
+	body = strings.TrimSpace(body)
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("terminal payload is not JSON: %v\n%s", err, body)
+	}
+	if len(payload.Response.Output) != 2 {
+		t.Fatalf("output items = %d, want 2 (message + function_call):\n%s", len(payload.Response.Output), body)
+	}
+	if payload.Response.Output[0].Content[0].Text != "done" {
+		t.Errorf("text item lost: %+v", payload.Response.Output[0])
+	}
+	call := payload.Response.Output[1]
+	if call.Type != "function_call" || call.CallID != "call_x" || call.Name != "lookup" || call.Arguments != `{"q":1}` {
+		t.Errorf("function_call item wrong: %+v", call)
 	}
 }
