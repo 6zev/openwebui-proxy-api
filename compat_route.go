@@ -70,7 +70,12 @@ func (p *Proxy) forwardTranslated(w http.ResponseWriter, r *http.Request, body [
 		w.Header().Set("X-Account-ID", a.config.ID)
 		w.Header().Set("X-Website-ID", a.config.WebsiteID)
 		var retry bool
-		response, err, retry = p.requestWithHeaders(ctx, a, "/api/chat/completions", http.MethodPost, chatBody, nil)
+		// The translated call is an INTERNAL chat request: the client never sees this
+		// body, so asking for usage here does not touch the caller's payload (the
+		// byte-for-byte guarantee applies to the passthrough path). Without it the
+		// Responses/Anthropic terminal events carry no real usage.
+		upstreamBody := ensureStreamUsage(chatBody)
+		response, err, retry = p.requestWithHeaders(ctx, a, "/api/chat/completions", http.MethodPost, upstreamBody, nil)
 		if err == nil {
 			break
 		}
