@@ -101,7 +101,7 @@ func backendAuthHeader(ctx context.Context, p *Proxy, a *account) (string, error
 	switch normalizeBackend(a.config.Backend) {
 	case BackendLibreChat:
 		if a.config.APIKey == "" {
-			return "", &apiError{502, "LibreChat account is missing its Agent API key", 0}
+			return "", &apiError{status: 502, message: "LibreChat account is missing its Agent API key"}
 		}
 		return "Bearer " + a.config.APIKey, nil
 	case BackendOpenWebUI:
@@ -111,7 +111,7 @@ func backendAuthHeader(ctx context.Context, p *Proxy, a *account) (string, error
 		}
 		return "Bearer " + token, nil
 	default:
-		return "", &apiError{502, "Unsupported backend for account " + a.config.ID, 0}
+		return "", &apiError{status: 502, message: "Unsupported backend for account " + a.config.ID}
 	}
 }
 
@@ -225,10 +225,10 @@ func requireIdempotencyKey(method, path string, h http.Header) error {
 		key = strings.TrimSpace(h.Get(libreChatEventIdempotencyKey))
 	}
 	if key == "" {
-		return &apiError{400, "Idempotency-Key header is required for events", 0}
+		return &apiError{status: 400, message: "Idempotency-Key header is required for events"}
 	}
 	if !validIdempotencyKey(key) {
-		return &apiError{400, "Idempotency-Key must be 1-256 characters of A-Za-z0-9._~:/+=-", 0}
+		return &apiError{status: 400, message: "Idempotency-Key must be 1-256 characters of A-Za-z0-9._~:/+=-"}
 	}
 	return nil
 }

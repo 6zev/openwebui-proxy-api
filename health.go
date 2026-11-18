@@ -192,7 +192,7 @@ func (p *Proxy) probe(ctx context.Context, a *account, deep bool) error {
 	}
 	path, ok := probePathFor(a.config.Backend)
 	if !ok {
-		err := &apiError{400, "backend has no health probe", 0}
+		err := &apiError{status: 400, message: "backend has no health probe"}
 		a.health.record(err, time.Since(start))
 		return err
 	}

@@ -224,11 +224,17 @@ Một số upstream (ví dụ `kaethegpt.duckdns.org`) chỉ có chat completion
 
 Bật `DEBUG_LOG=1` rồi khởi động lại. Log đi ra stderr **và** vào vòng đệm 300 dòng xem được ở Dashboard → thẻ “Log chẩn đoán” (API `GET /api/admin/logs`), không cần shell trên host.
 
+Dashboard còn có thẻ **“Lưu lượng theo website”** (`GET /api/admin/usage`): số request thành công / lỗi theo từng website trong 60 phút gần nhất, thời điểm và model của request cuối, cùng **lý do lỗi cuối cùng** upstream trả về. Số liệu chỉ nằm trong bộ nhớ (không ghi đĩa) và mất khi khởi động lại.
+
 - Mỗi lời gọi upstream một dòng: `debug: POST /api/chat/completions account=… website=… status=400 elapsed=…`.
 - Khi upstream trả lỗi, in thêm **đoạn thân lỗi** (tối đa 1.5 KB, đã nén khoảng trắng) — chính là chỗ Open WebUI nói rõ vì sao trả `400`.
 - Passthrough (Responses, tools, MCP, embeddings…) in ra danh sách key của body và **cảnh báo** khi gặp field mà `/openai/responses` của Open WebUI hay từ chối: `reasoning`, `include`, `store`, `metadata`, `parallel_tool_calls`, `previous_response_id`, `truncation`, `background`, `top_logprobs`, `tool_choice`, `service_tier`, `max_tool_calls`, `prompt_cache_key`.
 - Không bao giờ log header `Authorization`, khoá proxy hay mật khẩu; body lỗi được lọc ký tự điều khiển trước khi ghi.
 - Tắt mặc định: khi `DEBUG_LOG` không bật, proxy chỉ log lúc khởi động và lỗi nghiêm trọng.
+
+### `{"detail":"You have no credits remaining..."}` từ client
+
+Từ v0.28.0 proxy **chuyển tiếp nguyên văn lý do** upstream trả về: response lỗi có `error.upstream` và `error.message` dạng `"Open WebUI returned HTTP 400: You have no credits remaining. ..."`. Trước đây chỉ có `returned HTTP 400` nên hết credit trông giống hệt request sai. Ngoài ra lỗi credit/quota được coi là lỗi **của account**: account đó vào cooldown và request chuyển sang account khác (ghim `X-Account-ID` thì không chuyển, trả lỗi thật).
 
 ### `debug: model-cache refresh failed ... Open WebUI login failed`
 

@@ -1,0 +1,95 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"strings"
+)
+
+// upstreamDetail extracts a human-readable reason from an upstream error body.
+//
+// Open WebUI (and most OpenAI-compatible servers) answer with
+//
+//	{"detail":"You have no credits remaining. Add credits to continue ..."}
+//
+// but the proxy used to discard that and reply "<Backend> returned HTTP 400",
+// which tells the caller nothing actionable: a spent credit balance looked
+// identical to a malformed request. The detail is now forwarded.
+func upstreamDetail(raw []byte) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '{' {
+		return ""
+	}
+	var envelope struct {
+		Detail json.RawMessage `json:"detail"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return ""
+	}
+	if text := detailText(envelope.Detail); text != "" {
+		return text
+	}
+	return detailText(envelope.Error)
+}
+
+// detailText accepts the shapes seen in the wild: a plain string, an object with
+// message/detail, or a list of validation errors.
+func detailText(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return sanitizeDetail(text)
+	}
+	var object struct {
+		Message string `json:"message"`
+		Detail  string `json:"detail"`
+		Code    string `json:"code"`
+	}
+	if json.Unmarshal(raw, &object) == nil {
+		if object.Message != "" {
+			return sanitizeDetail(object.Message)
+		}
+		if object.Detail != "" {
+			return sanitizeDetail(object.Detail)
+		}
+	}
+	var list []struct {
+		Msg  string `json:"msg"`
+		Loc  []any  `json:"loc"`
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &list) == nil && len(list) > 0 {
+		parts := make([]string, 0, len(list))
+		for _, item := range list {
+			if item.Msg != "" {
+				parts = append(parts, item.Msg)
+			}
+		}
+		if len(parts) > 0 {
+			return sanitizeDetail(strings.Join(parts, "; "))
+		}
+	}
+	return ""
+}
+
+// sanitizeDetail keeps an upstream message on one line and bounded, because it is
+// upstream-controlled text that ends up in a client-facing error.
+func sanitizeDetail(text string) string {
+	const limit = 400
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > limit {
+		text = text[:limit] + "…"
+	}
+	return text
+}
+
+// readUpstreamError drains a bounded amount of an error body so the reason can be
+// forwarded even when debug logging is off.
+func readUpstreamError(body io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(body, 8<<10))
+}

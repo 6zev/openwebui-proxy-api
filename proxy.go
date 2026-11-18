@@ -103,6 +103,7 @@ type Proxy struct {
 	sites         map[string]WebsiteConfig
 	mu            sync.Mutex
 	nextByWebsite map[string]int
+	usage         *usageStats
 	// modelCache holds the last successful model list per account key.
 	modelCache *modelCache
 }
@@ -110,6 +111,17 @@ type apiError struct {
 	status     int
 	message    string
 	retryAfter int
+	// upstream carries the reason the upstream gave, so a client sees why a call
+	// was refused (for example "You have no credits remaining") instead of a bare
+	// status code.
+	upstream string
+	// quota marks a rejection caused by the account's credit/quota state, which
+	// makes another account worth trying.
+	quota bool
+	// website/account name the target that refused, which the console surfaces;
+	// they are never sent to the API caller.
+	website string
+	account string
 }
 
 // apiErrorStored is an apiError whose verdict came from cached state (cooldown,
@@ -180,7 +192,7 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 	}
 	c.Websites = append([]WebsiteConfig{}, c.Websites...)
 	c.Accounts = append([]AccountConfig{}, c.Accounts...)
-	p := &Proxy{config: c, key: sha256.Sum256([]byte(c.APIKey)), sites: make(map[string]WebsiteConfig), nextByWebsite: make(map[string]int)}
+	p := &Proxy{config: c, key: sha256.Sum256([]byte(c.APIKey)), sites: make(map[string]WebsiteConfig), nextByWebsite: make(map[string]int), usage: newUsageStats()}
 	if c.ModelCacheTTL > 0 {
 		p.modelCache = newAdaptiveModelCache(c.ModelCacheTTL, c.ModelCacheMaxTTL)
 		if c.DisableAdaptiveCache {
@@ -288,7 +300,14 @@ func writeError(w http.ResponseWriter, err error) {
 	if e.status == 401 {
 		typ = "authentication_error"
 	}
-	writeJSON(w, e.status, map[string]any{"error": map[string]any{"message": e.message, "type": typ, "code": strconv.Itoa(e.status)}})
+	body := map[string]any{"message": e.message, "type": typ, "code": strconv.Itoa(e.status)}
+	if e.upstream != "" {
+		body["upstream"] = e.upstream
+		// The message is what most clients display, so put the real reason there
+		// while keeping the generic line as context.
+		body["message"] = fmt.Sprintf("%s: %s", e.message, e.upstream)
+	}
+	writeJSON(w, e.status, map[string]any{"error": body})
 }
 
 // debugf logs only when DEBUG_LOG is enabled, so a normal deployment stays quiet.
@@ -387,10 +406,10 @@ func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
 	if website != "" {
 		s, ok := p.sites[website]
 		if !ok {
-			return nil, &apiError{400, "Unknown X-Website-ID", 0}
+			return nil, &apiError{status: 400, message: "Unknown X-Website-ID"}
 		}
 		if s.Disabled {
-			return nil, &apiError{503, "Selected website is disabled", 0}
+			return nil, &apiError{status: 503, message: "Selected website is disabled"}
 		}
 	}
 	if id != "" {
@@ -408,14 +427,14 @@ func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
 			matches = append(matches, a)
 		}
 		if len(matches) == 0 {
-			return nil, &apiError{400, "Unknown X-Account-ID", 0}
+			return nil, &apiError{status: 400, message: "Unknown X-Account-ID"}
 		}
 		if len(matches) > 1 {
-			return nil, &apiError{409, "Account ID is ambiguous across websites; send X-Website-ID as well", 0}
+			return nil, &apiError{status: 409, message: "Account ID is ambiguous across websites; send X-Website-ID as well"}
 		}
 		a := matches[0]
 		if a.config.Disabled {
-			return nil, &apiError{503, "Selected account or website is disabled", 0}
+			return nil, &apiError{status: 503, message: "Selected account or website is disabled"}
 		}
 		if n := accountCooldown(a); n > 0 {
 			return nil, storedError(429, "Selected account is cooling down", n)
@@ -437,7 +456,7 @@ func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
 		eligible = append(eligible, a)
 	}
 	if len(eligible) == 0 {
-		return nil, &apiError{503, "No enabled accounts configured for this route", 0}
+		return nil, &apiError{status: 503, message: "No enabled accounts configured for this route"}
 	}
 	start := p.nextByWebsite[website] % len(eligible)
 	p.nextByWebsite[website] = (start + 1) % len(eligible)
@@ -453,7 +472,7 @@ func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
 		}
 	}
 	if len(result) == 0 {
-		return nil, &apiError{429, "All accounts are cooling down", wait}
+		return nil, &apiError{status: 429, message: "All accounts are cooling down", retryAfter: wait}
 	}
 	return result, nil
 }
@@ -491,9 +510,9 @@ func (p *Proxy) login(ctx context.Context, a *account) (string, error) {
 		a.loginBlocked = time.Now().Add(d)
 		p.cooldown(a, d)
 		if resp.StatusCode == 429 {
-			return "", &apiError{429, "Open WebUI login rate limited", remaining(a.loginBlocked)}
+			return "", &apiError{status: 429, message: "Open WebUI login rate limited", retryAfter: remaining(a.loginBlocked)}
 		}
-		return "", &apiError{502, "Open WebUI login failed; check credentials and password-login settings", 0}
+		return "", &apiError{status: 502, message: "Open WebUI login failed; check credentials and password-login settings"}
 	}
 	var session struct {
 		Token     string `json:"token"`
@@ -502,7 +521,7 @@ func (p *Proxy) login(ctx context.Context, a *account) (string, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&session); err != nil || session.Token == "" {
 		a.loginBlocked = time.Now().Add(p.config.Cooldown)
 		p.cooldown(a, p.config.Cooldown)
-		return "", &apiError{502, "Open WebUI did not return a valid login token", 0}
+		return "", &apiError{status: 502, message: "Open WebUI did not return a valid login token"}
 	}
 	a.token = session.Token
 	a.expires = time.Time{}
@@ -565,6 +584,7 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 		resp, err := a.client.Do(req)
 		if err != nil {
 			p.debugf("debug: %s %s account=%s website=%s transport-error=%v elapsed=%s", method, path, a.config.ID, a.config.WebsiteID, err, time.Since(started))
+			p.usage.record(a.config.WebsiteID, 0, "", err.Error())
 			if ctx.Err() == nil {
 				p.cooldown(a, p.config.Cooldown)
 			}
@@ -589,15 +609,22 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 			continue
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			p.usage.record(a.config.WebsiteID, resp.StatusCode, "", "")
 			return resp, nil, false
 		}
-		var errorExcerpt []byte
+		// Always read a bounded excerpt: the reason is forwarded to the caller, not
+		// only logged. "returned HTTP 400" alone made a spent credit balance
+		// indistinguishable from a malformed request.
+		errorExcerpt, _ := readUpstreamError(resp.Body)
 		if p.config.DebugLog {
-			errorExcerpt, _ = io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 			p.debugf("debug: upstream error body %s %s account=%s -> %s", method, path, a.config.ID, debugBody(errorExcerpt))
 		}
 		resp.Body.Close()
 		e := &apiError{status: resp.StatusCode, message: fmt.Sprintf("%s returned HTTP %d", backendLabel(a.config.Backend), resp.StatusCode)}
+		e.upstream = upstreamDetail(errorExcerpt)
+		e.website = a.config.WebsiteID
+		e.account = a.config.ID
+		p.usage.record(a.config.WebsiteID, resp.StatusCode, "", e.upstream)
 		if resp.StatusCode == 429 {
 			d := p.retryDuration(resp.Header.Get("Retry-After"))
 			p.cooldown(a, d)
@@ -607,13 +634,47 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 			p.cooldown(a, p.config.Cooldown)
 			return nil, e, true
 		}
+		// A spent balance is about this account, not the request: cool it down so
+		// round-robin stops sending chats into a wall, and let the caller's account
+		// loop try another one.
+		if p.shouldRetryAnotherAccount(resp.StatusCode, errorExcerpt) {
+			e.quota = true
+			p.cooldown(a, p.config.Cooldown)
+			return nil, e, false
+		}
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			e.status = 502
 			e.message = "Upstream returned an unexpected redirect"
 		}
 		return nil, e, false
 	}
-	return nil, &apiError{502, "Upstream authentication failed", 0}, false
+	return nil, &apiError{status: 502, message: "Upstream authentication failed"}, false
+}
+
+// quotaRejected reports whether an error was caused by the account's own quota or
+// credit balance rather than by the request.
+func quotaRejected(err error) bool {
+	var known *apiError
+	if !errors.As(err, &known) {
+		return false
+	}
+	return known.quota
+}
+
+// shouldRetryAnotherAccount reports whether an upstream rejection is about the
+// ACCOUNT (credits, quota) rather than the request, so another account is worth
+// trying. The body is the only place this information exists.
+func (p *Proxy) shouldRetryAnotherAccount(status int, body []byte) bool {
+	if status != 400 && status != 402 && status != 403 && status != 429 {
+		return false
+	}
+	detail := strings.ToLower(upstreamDetail(body))
+	for _, marker := range []string{"no credits remaining", "credit balance is too low", "insufficient_quota", "exceeded your current quota", "quota exceeded", "out of credits"} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -623,12 +684,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	fields := strings.Fields(r.Header.Get("Authorization"))
 	if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") {
-		writeError(w, &apiError{401, "Invalid proxy API key", 0})
+		writeError(w, &apiError{status: 401, message: "Invalid proxy API key"})
 		return
 	}
 	hash := sha256.Sum256([]byte(fields[1]))
 	if subtle.ConstantTimeCompare(hash[:], p.key[:]) != 1 {
-		writeError(w, &apiError{401, "Invalid proxy API key", 0})
+		writeError(w, &apiError{status: 401, message: "Invalid proxy API key"})
 		return
 	}
 	if r.Method == http.MethodGet && (r.URL.Path == "/v1/health" || r.URL.Path == "/v1/healthz") {
@@ -677,7 +738,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !models && !chat && !passThrough {
-		writeError(w, &apiError{404, "Endpoint not found", 0})
+		writeError(w, &apiError{status: 404, message: "Endpoint not found"})
 		return
 	}
 	var body []byte
@@ -689,9 +750,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			var max *http.MaxBytesError
 			if errors.As(err, &max) {
-				writeError(w, &apiError{413, "Request exceeds 10 MiB", 0})
+				writeError(w, &apiError{status: 413, message: "Request exceeds 10 MiB"})
 			} else {
-				writeError(w, &apiError{400, "Invalid request body", 0})
+				writeError(w, &apiError{status: 400, message: "Invalid request body"})
 			}
 			return
 		}
@@ -710,13 +771,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if chat {
 		var input map[string]json.RawMessage
 		if json.Unmarshal(body, &input) != nil || input == nil {
-			writeError(w, &apiError{400, "Body must be a JSON object", 0})
+			writeError(w, &apiError{status: 400, message: "Body must be a JSON object"})
 			return
 		}
 		var model string
 		if raw, ok := input["model"]; ok {
 			if json.Unmarshal(raw, &model) != nil {
-				writeError(w, &apiError{400, "model must be a string", 0})
+				writeError(w, &apiError{status: 400, message: "model must be a string"})
 				return
 			}
 		}
@@ -726,7 +787,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var messages []json.RawMessage
 		if strings.TrimSpace(model) == "" || json.Unmarshal(input["messages"], &messages) != nil || messages == nil {
-			writeError(w, &apiError{400, "model and messages[] are required", 0})
+			writeError(w, &apiError{status: 400, message: "model and messages[] are required"})
 			return
 		}
 		// "<prefix>/<model>" lets an OpenAI client pick the account or website
@@ -822,7 +883,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if mapped, ok := libreChatUpstreamPath(public); ok {
 				accountPath = mapped
 			} else {
-				err = &apiError{404, "Endpoint not found", 0}
+				err = &apiError{status: 404, message: "Endpoint not found"}
 				break
 			}
 		}
@@ -834,7 +895,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			served = a
 			break
 		}
-		if r.Header.Get("X-Account-ID") != "" || !retry {
+		// Retry the next account on a server error, or when this account was
+		// rejected for its own quota; a pinned account never fails over.
+		if r.Header.Get("X-Account-ID") != "" || (!retry && !quotaRejected(err)) {
 			break
 		}
 	}
@@ -861,7 +924,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(raw) > 8<<20 {
-			writeError(w, &apiError{502, "Model list exceeds 8 MiB", 0})
+			writeError(w, &apiError{status: 502, message: "Model list exceeds 8 MiB"})
 			return
 		}
 		var items []struct {
@@ -876,7 +939,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			raw = envelope.Data
 		}
 		if json.Unmarshal(raw, &items) != nil || items == nil {
-			writeError(w, &apiError{502, "Unexpected model-list response", 0})
+			writeError(w, &apiError{status: 502, message: "Unexpected model-list response"})
 			return
 		}
 		cached := make([]cachedModel, 0, len(items))
@@ -1006,7 +1069,7 @@ func (p *Proxy) forwardBody(w http.ResponseWriter, r *http.Request, body []byte,
 		if a.config.Backend == BackendLibreChat {
 			mapped, ok := libreChatUpstreamPath(r.URL.Path)
 			if !ok {
-				err = &apiError{404, "Endpoint not found", 0}
+				err = &apiError{status: 404, message: "Endpoint not found"}
 				break
 			}
 			accountPath = mapped
@@ -1016,7 +1079,9 @@ func (p *Proxy) forwardBody(w http.ResponseWriter, r *http.Request, body []byte,
 			break
 		}
 		// Only pre-response failures may rotate; tool calls can have side effects.
-		if r.Header.Get("X-Account-ID") != "" || !retry {
+		// Retry the next account on a server error, or when this account was
+		// rejected for its own quota; a pinned account never fails over.
+		if r.Header.Get("X-Account-ID") != "" || (!retry && !quotaRejected(err)) {
 			break
 		}
 	}

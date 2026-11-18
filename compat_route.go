@@ -43,7 +43,7 @@ func (p *Proxy) forwardTranslated(w http.ResponseWriter, r *http.Request, body [
 		err = errors.New("unsupported translation")
 	}
 	if err != nil {
-		writeError(w, &apiError{400, "Cannot translate request: " + err.Error(), 0})
+		writeError(w, &apiError{status: 400, message: "Cannot translate request: " + err.Error()})
 		return
 	}
 	var model string
@@ -92,7 +92,7 @@ func (p *Proxy) forwardTranslated(w http.ResponseWriter, r *http.Request, body [
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(response.Body, 16<<20))
 	if readErr != nil {
-		writeError(w, &apiError{502, "Upstream response was cut off", 0})
+		writeError(w, &apiError{status: 502, message: "Upstream response was cut off"})
 		return
 	}
 	switch kind {

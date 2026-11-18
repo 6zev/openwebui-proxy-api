@@ -778,6 +778,43 @@
       output.scrollTop = output.scrollHeight;
     } catch (error) { output.textContent = `Không tải được log: ${sanitized(error.message)}`; }
   });
+  async function renderUsage() {
+    const output = $('usage-output');
+    try {
+      const result = await api('/api/admin/usage');
+      const rows = Array.isArray(result.data) ? result.data : [];
+      if (!rows.length) { output.innerHTML = '<p class="muted">Chưa có request nào kể từ khi proxy khởi động.</p>'; return; }
+      const table = document.createElement('table');
+      table.className = 'usage-table';
+      const head = document.createElement('thead');
+      head.innerHTML = '<tr><th>Website</th><th>OK</th><th>Lỗi</th><th>Gần nhất</th><th>Lỗi cuối</th></tr>';
+      table.append(head);
+      const body = document.createElement('tbody');
+      rows.forEach((row) => {
+        const tr = document.createElement('tr');
+        const cells = [
+          String(row.website ?? ''),
+          String(row.success ?? 0),
+          String(row.failed ?? 0),
+          row.last_seen ? `${row.last_status ?? ''} · ${new Date(row.last_seen).toLocaleTimeString()}` : '—',
+          row.last_error ? String(row.last_error) : '—',
+        ];
+        cells.forEach((value, index) => {
+          const td = document.createElement('td');
+          td.textContent = sanitized(value);
+          if (index === 4) td.className = 'usage-error';
+          if (index === 1 || index === 2) td.className = 'usage-num';
+          tr.append(td);
+        });
+        body.append(tr);
+      });
+      table.append(body);
+      output.replaceChildren(table);
+    } catch (error) { output.replaceChildren(Object.assign(document.createElement('p'), { className: 'muted', textContent: `Không tải được lưu lượng: ${sanitized(error.message)}` })); }
+  }
+  $('usage-refresh').addEventListener('click', renderUsage);
+  $('usage-refresh').dataset.ready = '1';
+  renderUsage();
   $('copy-api-button').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(location.origin + '/v1'); notice('Đã sao chép API base URL.'); }
     catch { $('api-base').focus(); $('api-base').select(); notice('Chọn URL và nhấn Ctrl+C hoặc ⌘C để sao chép.'); }

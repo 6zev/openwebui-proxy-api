@@ -174,7 +174,7 @@ func (a *Application) state(w http.ResponseWriter) {
 func decodeAdmin(w http.ResponseWriter, r *http.Request, out any) error {
 	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || media != "application/json" {
-		return &apiError{400, "Content-Type must be application/json", 0}
+		return &apiError{status: 400, message: "Content-Type must be application/json"}
 	}
 	body := http.MaxBytesReader(w, r.Body, 1<<20)
 	defer body.Close()
@@ -182,21 +182,21 @@ func decodeAdmin(w http.ResponseWriter, r *http.Request, out any) error {
 	if err != nil {
 		var max *http.MaxBytesError
 		if errors.As(err, &max) {
-			return &apiError{413, "Admin request exceeds 1 MiB", 0}
+			return &apiError{status: 413, message: "Admin request exceeds 1 MiB"}
 		}
-		return &apiError{400, "Invalid JSON body", 0}
+		return &apiError{status: 400, message: "Invalid JSON body"}
 	}
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.TrimSpace(raw)[0] != '{' {
-		return &apiError{400, "Body must be a JSON object", 0}
+		return &apiError{status: 400, message: "Body must be a JSON object"}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(out) != nil {
-		return &apiError{400, "Invalid JSON body or unsupported field", 0}
+		return &apiError{status: 400, message: "Invalid JSON body or unsupported field"}
 	}
 	var extra any
 	if decoder.Decode(&extra) != io.EOF {
-		return &apiError{400, "Body must contain exactly one JSON object", 0}
+		return &apiError{status: 400, message: "Body must contain exactly one JSON object"}
 	}
 	return nil
 }
@@ -249,7 +249,7 @@ func (a *Application) mutate(change func(*configDocument) error) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.cfg.ConfigPath == "" {
-		return &apiError{503, "Set CONFIG_FILE to enable persistent WebUI edits", 0}
+		return &apiError{status: 503, message: "Set CONFIG_FILE to enable persistent WebUI edits"}
 	}
 	doc := configDocument{Websites: append([]WebsiteConfig{}, a.cfg.Websites...), Accounts: append([]AccountConfig{}, a.cfg.Accounts...)}
 	if err := change(&doc); err != nil {
@@ -260,7 +260,7 @@ func (a *Application) mutate(change func(*configDocument) error) error {
 	nextCfg.Accounts = doc.Accounts
 	next, err := buildProxy(nextCfg, true)
 	if err != nil {
-		return &apiError{400, err.Error(), 0}
+		return &apiError{status: 400, message: err.Error()}
 	}
 	// Preserve tokens, cooldown and connection pools for accounts whose effective
 	// credentials, website and outbound transport have not changed.
@@ -275,7 +275,7 @@ func (a *Application) mutate(change func(*configDocument) error) error {
 	}
 	if err := persistDocument(a.cfg.ConfigPath, doc); err != nil {
 		next.CloseIdleConnections()
-		return &apiError{500, "Could not save configuration; running configuration is unchanged", 0}
+		return &apiError{status: 500, message: "Could not save configuration; running configuration is unchanged"}
 	}
 	old := a.proxy
 	a.proxy = next
@@ -309,11 +309,11 @@ type accountDraft struct {
 
 func (a *Application) websiteMutation(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodDelete {
-		writeError(w, &apiError{405, "Method not allowed", 0})
+		writeError(w, &apiError{status: 405, message: "Method not allowed"})
 		return
 	}
 	if (r.Method == http.MethodPost && id != "") || (r.Method != http.MethodPost && id == "") {
-		writeError(w, &apiError{404, "Endpoint not found", 0})
+		writeError(w, &apiError{status: 404, message: "Endpoint not found"})
 		return
 	}
 	var draft websiteDraft
@@ -326,7 +326,7 @@ func (a *Application) websiteMutation(w http.ResponseWriter, r *http.Request, id
 	if r.Method == http.MethodPost {
 		id = draft.ID
 	} else if draft.ID != "" && draft.ID != id {
-		writeError(w, &apiError{400, "Website ID is immutable", 0})
+		writeError(w, &apiError{status: 400, message: "Website ID is immutable"})
 		return
 	}
 	err := a.mutate(func(doc *configDocument) error {
@@ -338,15 +338,15 @@ func (a *Application) websiteMutation(w http.ResponseWriter, r *http.Request, id
 			}
 		}
 		if r.Method == http.MethodPost && index >= 0 {
-			return &apiError{409, "Website ID already exists", 0}
+			return &apiError{status: 409, message: "Website ID already exists"}
 		}
 		if r.Method != http.MethodPost && index < 0 {
-			return &apiError{404, "Website not found", 0}
+			return &apiError{status: 404, message: "Website not found"}
 		}
 		if r.Method == http.MethodDelete {
 			for _, c := range doc.Accounts {
 				if c.WebsiteID == id {
-					return &apiError{409, "Delete or move accounts belonging to this website first", 0}
+					return &apiError{status: 409, message: "Delete or move accounts belonging to this website first"}
 				}
 			}
 			doc.Websites = append(doc.Websites[:index], doc.Websites[index+1:]...)
@@ -390,11 +390,11 @@ func (a *Application) websiteMutation(w http.ResponseWriter, r *http.Request, id
 }
 func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodDelete {
-		writeError(w, &apiError{405, "Method not allowed", 0})
+		writeError(w, &apiError{status: 405, message: "Method not allowed"})
 		return
 	}
 	if (r.Method == http.MethodPost && id != "") || (r.Method != http.MethodPost && id == "") {
-		writeError(w, &apiError{404, "Endpoint not found", 0})
+		writeError(w, &apiError{status: 404, message: "Endpoint not found"})
 		return
 	}
 	var draft accountDraft
@@ -411,7 +411,7 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 		// part is immutable.
 		_, bareID := splitAccountKey(id)
 		if draft.ID != bareID {
-			writeError(w, &apiError{400, "Account ID is immutable", 0})
+			writeError(w, &apiError{status: 400, message: "Account ID is immutable"})
 			return
 		}
 	}
@@ -432,7 +432,7 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 		// A bare ID that exists in several websites would silently edit or
 		// delete the wrong account, so it is refused instead of guessed.
 		if websiteID == "" && matches > 1 {
-			return &apiError{409, "Account ID exists in more than one website; use <website-id>/<account-id>", 0}
+			return &apiError{status: 409, message: "Account ID exists in more than one website; use <website-id>/<account-id>"}
 		}
 		if r.Method == http.MethodPost {
 			// POST creates: the same ID may exist in another website, but not in
@@ -443,13 +443,13 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 			}
 			for _, c := range doc.Accounts {
 				if c.ID == accountID && c.WebsiteID == targetSite {
-					return &apiError{409, "Account ID already exists in this website", 0}
+					return &apiError{status: 409, message: "Account ID already exists in this website"}
 				}
 			}
 			index = -1
 		}
 		if r.Method != http.MethodPost && index < 0 {
-			return &apiError{404, "Account not found", 0}
+			return &apiError{status: 404, message: "Account not found"}
 		}
 		if r.Method == http.MethodDelete {
 			doc.Accounts = append(doc.Accounts[:index], doc.Accounts[index+1:]...)
@@ -528,7 +528,7 @@ func (a *Application) testAccount(w http.ResponseWriter, r *http.Request, key st
 		}
 	}
 	if selected == nil {
-		writeError(w, &apiError{404, "Account not found", 0})
+		writeError(w, &apiError{status: 404, message: "Account not found"})
 		return
 	}
 	// The operator asked for live evidence, so the check must not replay the
@@ -539,7 +539,7 @@ func (a *Application) testAccount(w http.ResponseWriter, r *http.Request, key st
 	selected.probeMu.Lock()
 	defer selected.probeMu.Unlock()
 	if selected.config.Disabled {
-		writeError(w, &apiError{503, "Account is disabled", 0})
+		writeError(w, &apiError{status: 503, message: "Account is disabled"})
 		return
 	}
 	probeCtx, cancel := context.WithTimeout(r.Context(), p.probeTimeout())
@@ -575,7 +575,7 @@ func (a *Application) testAccount(w http.ResponseWriter, r *http.Request, key st
 		Data []json.RawMessage `json:"data"`
 	}
 	if json.Unmarshal(recorder.Body.Bytes(), &response) != nil {
-		writeError(w, &apiError{502, "Invalid model list", 0})
+		writeError(w, &apiError{status: 502, message: "Invalid model list"})
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "account_id": id, "website_id": selected.config.WebsiteID, "models": response.Data})
@@ -721,12 +721,12 @@ func serveWeb(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		writeError(w, &apiError{405, "Method not allowed", 0})
+		writeError(w, &apiError{status: 405, message: "Method not allowed"})
 		return true
 	}
 	data, err := webAssets.ReadFile("web/" + name)
 	if err != nil {
-		writeError(w, &apiError{500, "WebUI asset unavailable", 0})
+		writeError(w, &apiError{status: 500, message: "WebUI asset unavailable"})
 		return true
 	}
 	w.Header().Set("Content-Type", contentType)
@@ -767,19 +767,19 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if blocked, wait := a.guard.blocked(host); blocked {
 		seconds := int((wait + time.Second - 1) / time.Second)
 		w.Header().Set("Retry-After", strconv.Itoa(seconds))
-		writeError(w, &apiError{429, "Too many failed admin attempts; retry later", seconds})
+		writeError(w, &apiError{status: 429, message: "Too many failed admin attempts; retry later", retryAfter: seconds})
 		return
 	}
 	if !a.authorized(r) {
 		if lock := a.guard.record(host); lock > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(int(lock/time.Second)))
 		}
-		writeError(w, &apiError{401, "Invalid admin API key", 0})
+		writeError(w, &apiError{status: 401, message: "Invalid admin API key"})
 		return
 	}
 	a.guard.reset(host)
 	if !adminOriginAllowed(r) {
-		writeError(w, &apiError{403, "Cross-origin admin requests are not allowed", 0})
+		writeError(w, &apiError{status: 403, message: "Cross-origin admin requests are not allowed"})
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/admin/")
@@ -790,6 +790,8 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.healthHandler(w, r)
 	case path == "logs" && r.Method == http.MethodGet:
 		a.logsHandler(w)
+	case path == "usage" && r.Method == http.MethodGet:
+		a.usageHandler(w)
 	case path == "state" && r.Method == http.MethodGet:
 		a.state(w)
 	case path == "models" && r.Method == http.MethodGet:
@@ -812,14 +814,14 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			parts = parts[:len(parts)-1]
 		}
 		if len(parts) == 0 || len(parts) > 2 {
-			writeError(w, &apiError{404, "Endpoint not found", 0})
+			writeError(w, &apiError{status: 404, message: "Endpoint not found"})
 		} else if wantsTest {
 			a.testAccount(w, r, strings.Join(parts, "/"))
 		} else {
 			a.accountMutation(w, r, strings.Join(parts, "/"))
 		}
 	default:
-		writeError(w, &apiError{404, "Endpoint not found", 0})
+		writeError(w, &apiError{status: 404, message: "Endpoint not found"})
 	}
 }
 

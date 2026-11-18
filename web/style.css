@@ -762,3 +762,42 @@ dialog::backdrop { background: #040609cc; backdrop-filter: blur(4px); }
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.usage {
+  overflow-x: auto;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.usage-table th,
+.usage-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line, #1e242b);
+  white-space: nowrap;
+}
+
+.usage-table th {
+  color: var(--muted, #7d8794);
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.usage-table td.usage-num {
+  font-variant-numeric: tabular-nums;
+  width: 64px;
+}
+
+.usage-table td.usage-error {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #f0a8a8;
+  white-space: nowrap;
+}

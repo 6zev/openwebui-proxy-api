@@ -39,7 +39,7 @@ func TestHealthProbeMarksDeadAccountAndSkipsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Force the "bad" account into a failed state.
-	p.accounts[1].health.record(&apiError{401, "credentials rejected", 0}, 0)
+	p.accounts[1].health.record(&apiError{status: 401, message: "credentials rejected"}, 0)
 	report := p.healthReport()
 	if report[1]["status"] != string(healthFailed) {
 		t.Fatalf("bad account status = %v", report[1]["status"])
@@ -135,7 +135,7 @@ func TestHealthEndpointShapes(t *testing.T) {
 }
 
 func TestHealthSanitizesErrors(t *testing.T) {
-	if got := sanitizeProbeError(&apiError{401, "credentials rejected", 0}); got != "credentials rejected" {
+	if got := sanitizeProbeError(&apiError{status: 401, message: "credentials rejected"}); got != "credentials rejected" {
 		t.Errorf("apiError passthrough = %q", got)
 	}
 	err := sanitizeProbeError(io.ErrUnexpectedEOF)

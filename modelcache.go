@@ -337,7 +337,7 @@ func (p *Proxy) fetchModelList(ctx context.Context, a *account) ([]cachedModel, 
 	if a.config.Backend == BackendLibreChat {
 		mapped, ok := libreChatUpstreamPath("/v1/models")
 		if !ok {
-			return nil, &apiError{404, "Endpoint not found", 0}
+			return nil, &apiError{status: 404, message: "Endpoint not found"}
 		}
 		path = mapped
 	}
@@ -351,15 +351,15 @@ func (p *Proxy) fetchModelList(ctx context.Context, a *account) ([]cachedModel, 
 	}
 	decoder := json.NewDecoder(response.Body)
 	if err := decoder.Decode(&envelope); err != nil {
-		return nil, &apiError{502, "Unexpected model-list response", 0}
+		return nil, &apiError{status: 502, message: "Unexpected model-list response"}
 	}
 	raw := envelope.Data
 	if raw == nil {
-		return nil, &apiError{502, "Unexpected model-list response", 0}
+		return nil, &apiError{status: 502, message: "Unexpected model-list response"}
 	}
 	var items []cachedModel
 	if err := json.Unmarshal(raw, &items); err != nil || items == nil {
-		return nil, &apiError{502, "Unexpected model-list response", 0}
+		return nil, &apiError{status: 502, message: "Unexpected model-list response"}
 	}
 	return items, nil
 }
