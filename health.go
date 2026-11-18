@@ -123,6 +123,12 @@ func (p *Proxy) probeAuth(ctx context.Context, a *account, deep bool) (string, e
 		a.token = ""
 		a.expires = time.Time{}
 		a.mu.Unlock()
+		// A LibreChat account authenticates with a static key: there is no login
+		// to force, and calling loginProbe would send an Open WebUI signin at a
+		// LibreChat host.
+		if a.config.Backend == BackendLibreChat {
+			return backendAuthHeader(ctx, p, a)
+		}
 		return p.loginProbe(ctx, a)
 	}
 	return backendAuthHeader(ctx, p, a)
@@ -228,17 +234,28 @@ func (p *Proxy) probe(ctx context.Context, a *account, deep bool) error {
 }
 
 // probePathFor picks a read-only endpoint per backend family.
+//
+// LibreChat is probed on the Agents API collection itself (/v1/agents), not
+// /v1/models: the Agents API is what an agent API key authorises, so a 401 there
+// means the key is wrong rather than the route being missing. /v1/models stays in
+// the table for callers that proxy model listings, but it is a different surface
+// and its failure would say nothing about the key.
 func probePathFor(kind BackendKind) (string, bool) {
 	if kind == BackendLibreChat {
-		path, ok := libreChatUpstreamPath("/v1/models")
+		path, ok := libreChatUpstreamPath("/v1/agents")
 		return path, ok
 	}
 	return "/api/models", true
 }
 
+// probeErrorText turns a probe status into the reason an operator sees. A 401 on
+// the Agents API almost always means the key was revoked or lacks the Agent
+// permission, which is worth saying out loud.
 func probeErrorText(status int) string {
 	switch {
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+	case status == http.StatusUnauthorized:
+		return "API key rejected by the Agents API — check the key and that its role has Remote Agents"
+	case status == http.StatusForbidden:
 		return "credentials rejected"
 	case status == http.StatusTooManyRequests:
 		return "rate limited"
