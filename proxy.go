@@ -94,7 +94,11 @@ type account struct {
 	refreshLogged   time.Time
 	cooldownMu      sync.Mutex
 	cooldownUntil   time.Time
-	health          accountHealth
+	// modelCooldown holds a per-model rejection (a provider behind Open WebUI can
+	// be out of credit while the others are fine). Keyed by model id, so a drained
+	// OpenAI balance does not take the account's working Claude models with it.
+	modelCooldown map[string]time.Time
+	health        accountHealth
 }
 type Proxy struct {
 	config        Config
@@ -339,6 +343,31 @@ func (p *Proxy) cooldown(a *account, d time.Duration) {
 
 // loginBlockSeconds exposes the remaining login block so health output can say
 // why an account is unavailable even when its last probe looked fine.
+// modelCooled reports whether this account was rejected for this specific model.
+func (p *Proxy) modelCooled(a *account, model string) (bool, int) {
+	a.cooldownMu.Lock()
+	defer a.cooldownMu.Unlock()
+	if until, ok := a.modelCooldown[model]; ok {
+		if remaining := time.Until(until); remaining > 0 {
+			return true, int((remaining + time.Second - 1) / time.Second)
+		}
+		delete(a.modelCooldown, model)
+	}
+	return false, 0
+}
+
+// cooldownModel marks one model as rejected for this account only.
+func (p *Proxy) cooldownModel(a *account, model string, d time.Duration) {
+	a.cooldownMu.Lock()
+	defer a.cooldownMu.Unlock()
+	if until := time.Now().Add(d); until.After(a.modelCooldown[model]) {
+		if a.modelCooldown == nil {
+			a.modelCooldown = make(map[string]time.Time)
+		}
+		a.modelCooldown[model] = until
+	}
+}
+
 func (a *account) loginBlockSeconds() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -401,6 +430,13 @@ func underAny(path string, prefixes ...string) bool {
 }
 
 func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
+	return p.candidatesForModel(id, website, "")
+}
+
+// candidatesForModel orders candidates so accounts that rejected this specific
+// model come last, without removing them: the same account may still serve other
+// models (a drained OpenAI balance must not hide its working Claude models).
+func (p *Proxy) candidatesForModel(id, website, model string) ([]*account, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if website != "" {
@@ -473,6 +509,23 @@ func (p *Proxy) candidatesFor(id, website string) ([]*account, error) {
 	}
 	if len(result) == 0 {
 		return nil, &apiError{status: 429, message: "All accounts are cooling down", retryAfter: wait}
+	}
+	if model != "" && len(result) > 1 {
+		fresh := make([]*account, 0, len(result))
+		rejected := make([]*account, 0, len(result))
+		for _, a := range result {
+			if cooled, _ := p.modelCooled(a, model); cooled {
+				rejected = append(rejected, a)
+				continue
+			}
+			fresh = append(fresh, a)
+		}
+		// Keep the rejected accounts as a last resort: if every candidate refused
+		// this model, the caller still gets the real upstream error rather than a
+		// "no accounts" message.
+		if len(fresh) > 0 {
+			result = append(fresh, rejected...)
+		}
 	}
 	return result, nil
 }
@@ -559,6 +612,21 @@ func (p *Proxy) request(ctx context.Context, a *account, path, method string, bo
 // without teaching this function about every surface. Static-key backends
 // (LibreChat Agents API) never perform a login round-trip and never auto-retry
 // a 401, because re-sending an idempotency-keyed event is the caller's call.
+// requestModel pulls the model id out of a request body, so a per-model rejection
+// can be attributed. Returns "" for bodies that carry no model.
+func requestModel(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var envelope struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return ""
+	}
+	return envelope.Model
+}
+
 func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method string, body []byte, extra http.Header) (*http.Response, error, bool) {
 	auth, err := backendAuthHeader(ctx, p, a)
 	if err != nil {
@@ -638,8 +706,15 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 		// round-robin stops sending chats into a wall, and let the caller's account
 		// loop try another one.
 		if p.shouldRetryAnotherAccount(resp.StatusCode, errorExcerpt) {
+			// Only this model is drained: Open WebUI fans out to several providers,
+			// so a spent OpenAI balance says nothing about Claude on the same
+			// account. Cooling the whole account would take working models offline.
 			e.quota = true
-			p.cooldown(a, p.config.Cooldown)
+			if model := requestModel(body); model != "" {
+				p.cooldownModel(a, model, p.config.Cooldown)
+			} else {
+				p.cooldown(a, p.config.Cooldown)
+			}
 			return nil, e, false
 		}
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
@@ -798,7 +873,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		body, _ = json.Marshal(input)
 	}
-	candidates, err := p.candidatesFor(r.Header.Get("X-Account-ID"), r.Header.Get("X-Website-ID"))
+	candidates, err := p.candidatesForModel(r.Header.Get("X-Account-ID"), r.Header.Get("X-Website-ID"), requestModel(body))
 	if err != nil {
 		writeError(w, err)
 		return

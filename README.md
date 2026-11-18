@@ -234,7 +234,7 @@ Dashboard còn có thẻ **“Lưu lượng theo website”** (`GET /api/admin/u
 
 ### `{"detail":"You have no credits remaining..."}` từ client
 
-Từ v0.28.0 proxy **chuyển tiếp nguyên văn lý do** upstream trả về: response lỗi có `error.upstream` và `error.message` dạng `"Open WebUI returned HTTP 400: You have no credits remaining. ..."`. Trước đây chỉ có `returned HTTP 400` nên hết credit trông giống hệt request sai. Ngoài ra lỗi credit/quota được coi là lỗi **của account**: account đó vào cooldown và request chuyển sang account khác (ghim `X-Account-ID` thì không chuyển, trả lỗi thật).
+Từ v0.28.0 proxy **chuyển tiếp nguyên văn lý do** upstream trả về: response lỗi có `error.upstream` và `error.message` dạng `"Open WebUI returned HTTP 400: You have no credits remaining. ..."`. Trước đây chỉ có `returned HTTP 400` nên hết credit trông giống hệt request sai. Ngoài ra lỗi credit/quota được coi là lỗi **của account**: account đó vào cooldown và request chuyển sang account khác (ghim `X-Account-ID` thì không chuyển, trả lỗi thật). Cooldown này là **theo từng model** (v0.29.0): Open WebUI gộp nhiều provider, nên một acc hết credit OpenAI vẫn phục vụ Claude bình thường — chặn cả acc sẽ làm mất các model còn sống. Với nhiều acc, acc đã từ chối model đó bị xếp **cuối** danh sách ứng viên (vẫn giữ làm phương án cuối để trả lỗi thật thay vì "không có acc").
 
 ### `debug: model-cache refresh failed ... Open WebUI login failed`
 
