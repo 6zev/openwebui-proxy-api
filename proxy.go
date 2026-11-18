@@ -731,18 +731,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// "<prefix>/<model>" lets an OpenAI client pick the account or website
 		// without custom headers: prefix may be an account ID or a website ID.
-		if prefix, rest, ok := splitModelPrefix(model); ok {
-			if exists := p.prefixTarget(prefix); exists {
-				model = rest
-				input["model"], _ = json.Marshal(model)
-				if r.Header.Get("X-Account-ID") == "" && r.Header.Get("X-Website-ID") == "" {
-					if p.isAccountID(prefix) {
-						r.Header.Set("X-Account-ID", prefix)
-					} else {
-						r.Header.Set("X-Website-ID", prefix)
-					}
-				}
-			}
+		if stripped, ok := p.stripRoutingPrefix(model, r.Header); ok {
+			model = stripped
+			input["model"], _ = json.Marshal(model)
 		}
 		body, _ = json.Marshal(input)
 	}

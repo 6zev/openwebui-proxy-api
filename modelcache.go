@@ -413,6 +413,16 @@ func (p *Proxy) mergedModelList(candidates []*account) ([]cachedModel, time.Time
 		return nil, time.Time{}, ""
 	}
 	merged := make([]cachedModel, 0, 64)
+	// A model id that exists on several websites must be listed once per owner:
+	// the caller routes by model id, so collapsing two websites' "gpt-4o" into one
+	// entry silently hides the second site and sends chats to whichever account
+	// round-robin picks — which then answers "Model not found" for a model that
+	// really does exist elsewhere.
+	//
+	// With MODEL_PREFIX the id is already qualified by website, so the plain id is
+	// unique. Without it, the same bare id may repeat per website; that is the
+	// price of an unqualified namespace, and the caller can disambiguate with
+	// X-Website-ID.
 	seen := make(map[string]bool, 64)
 	var newest time.Time
 	covered, anyStale := 0, false
@@ -434,16 +444,17 @@ func (p *Proxy) mergedModelList(candidates []*account) ([]cachedModel, time.Time
 			newest = fetchedAt
 		}
 		for _, model := range models {
-			// The prefix varies per website, so key on the bare id plus owner to
-			// keep two websites' same-named models distinct in "account" mode.
-			id := model.ID
-			if p.config.ModelPrefix && a.config.WebsiteID != "" {
-				id = a.config.WebsiteID + "/" + model.ID
+			// Qualify by website while merging so two sites that list the same model
+			// both survive the union. Without MODEL_PREFIX the id is listed bare, so
+			// the qualified key only prevents collapsing duplicates.
+			qualifier := ""
+			if a.config.WebsiteID != "" {
+				qualifier = a.config.WebsiteID + "\x00"
 			}
-			if seen[id] {
+			if seen[qualifier+model.ID] {
 				continue
 			}
-			seen[id] = true
+			seen[qualifier+model.ID] = true
 			merged = append(merged, model)
 		}
 	}
@@ -454,6 +465,17 @@ func (p *Proxy) mergedModelList(candidates []*account) ([]cachedModel, time.Time
 		return merged, newest, "stale"
 	}
 	return merged, newest, "hit"
+}
+
+// refreshAllCandidates refreshes every candidate's entry in the background, so a
+// stale union becomes a fresh union for the next caller.
+func (p *Proxy) refreshAllCandidates(ctx context.Context, candidates []*account) {
+	for _, a := range candidates {
+		if a.config.Disabled {
+			continue
+		}
+		p.refreshModelEntry(ctx, a)
+	}
 }
 
 // primeCandidateLists fetches every candidate that has no cached entry, in
@@ -482,15 +504,4 @@ func (p *Proxy) primeCandidateLists(ctx context.Context, candidates []*account) 
 		}(a)
 	}
 	wg.Wait()
-}
-
-// refreshAllCandidates refreshes every candidate's entry in the background, so a
-// stale union becomes a fresh union for the next caller.
-func (p *Proxy) refreshAllCandidates(ctx context.Context, candidates []*account) {
-	for _, a := range candidates {
-		if a.config.Disabled {
-			continue
-		}
-		p.refreshModelEntry(ctx, a)
-	}
 }

@@ -68,8 +68,12 @@ func TestModelListIsUnionAcrossWebsites(t *testing.T) {
 			t.Errorf("merged listing missing %q: %s", want, third.body)
 		}
 	}
-	if strings.Count(third.body, `"shared"`) != 1 {
-		t.Errorf("duplicate model leaked into the listing: %s", third.body)
+	// Without MODEL_PREFIX the bare ids collide, so "shared" appears once per
+	// website on purpose: the caller routes by id, and hiding the second site
+	// would make that site's model unreachable. With MODEL_PREFIX the ids are
+	// already qualified and each appears exactly once.
+	if strings.Count(third.body, `"shared"`) != 2 {
+		t.Errorf("expected one shared entry per website, got: %s", third.body)
 	}
 }
 
