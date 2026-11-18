@@ -348,3 +348,66 @@ func TestModelCacheSecondsZeroDisablesCache(t *testing.T) {
 		t.Error("negative value should still be rejected")
 	}
 }
+
+// The refresher must create entries for configured accounts, not only refresh
+// keys that a client already happened to populate.
+func TestRefreshModelCacheWarmsEveryAccount(t *testing.T) {
+	var hits atomic.Int32
+	u := slowModelsUpstream(t, 0, &hits)
+	cfg := proxyTestConfig(u, "one", "two")
+	cfg.ModelCacheTTL = time.Minute
+	p, err := NewProxy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys := p.modelCache.keys(); len(keys) != 0 {
+		t.Fatalf("cache should start empty, has %v", keys)
+	}
+	p.refreshModelCache(context.Background())
+	if got := hits.Load(); got != 2 {
+		t.Errorf("upstream hits = %d, want 2 (one per account)", got)
+	}
+	if keys := p.modelCache.keys(); len(keys) != 2 {
+		t.Errorf("cache keys = %v, want both accounts warmed", keys)
+	}
+}
+
+// The startup loop must warm immediately instead of waiting one interval.
+func TestModelCacheLoopWarmsImmediately(t *testing.T) {
+	var hits atomic.Int32
+	u := slowModelsUpstream(t, 0, &hits)
+	cfg := proxyTestConfig(u, "one")
+	cfg.ModelCacheTTL = time.Minute
+	app, err := NewApplication(cfg, adminTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Long interval: any hit within the wait came from the immediate warm-up.
+	app.modelCacheLoop(ctx, time.Hour)
+	deadline := time.Now().Add(2 * time.Second)
+	for hits.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if hits.Load() == 0 {
+		t.Fatal("cache was not warmed at startup")
+	}
+}
+
+// A failed account must not be hammered by the cache refresher.
+func TestRefreshModelCacheSkipsFailedAccounts(t *testing.T) {
+	var hits atomic.Int32
+	u := slowModelsUpstream(t, 0, &hits)
+	cfg := proxyTestConfig(u, "one")
+	cfg.ModelCacheTTL = time.Minute
+	p, err := NewProxy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.accounts[0].health.record(errors.New("boom"), 0)
+	p.refreshModelCache(context.Background())
+	if hits.Load() != 0 {
+		t.Errorf("failed account refreshed %d times, want 0", hits.Load())
+	}
+}

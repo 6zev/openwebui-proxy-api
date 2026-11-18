@@ -701,6 +701,11 @@ func (a *Application) modelCacheLoop(ctx context.Context, interval time.Duration
 		return
 	}
 	go func() {
+		// Warm the cache immediately: a slow upstream (/api/models taking 21s)
+		// should be paid for in the background at startup, not by the first client
+		// that asks for models.
+		proxy, _, _ := a.snapshot()
+		proxy.refreshModelCache(ctx)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {

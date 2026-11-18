@@ -195,6 +195,9 @@ DEBUG_LOG=1                      # log chẩn đoán: mỗi lời gọi upstream
 - **Log lỗi refresh được giới hạn**: cùng một acc lỗi (ví dụ mật khẩu bị từ chối) chỉ in **một dòng mỗi 10 phút** kèm `consecutive=N`, và in dòng `recovered` khi hết lỗi — trước đây in mỗi 2,5 phút, một log thật có 195 dòng trùng nhau che hết mọi thứ khác. Xem lỗi hiện tại của acc ở Dashboard → Health.
 - **TTL tự nới cho upstream đắt**: entry giữ lâu bằng `max(TTL, 30 × thời gian fetch)`, chặn trên bởi `MODEL_CACHE_MAX_SECONDS`. Danh sách 21s vì thế không bị gọi lại mỗi 5 phút; danh sách 0.8s vẫn theo TTL gốc.
 - **Upstream lỗi**: danh sách cũ vẫn được phục vụ (`stale-error` + `X-Cache-Error: upstream-failed`) thay vì trả lỗi cho client.
+- **Warm ngay khi khởi động**: proxy fetch model cho mọi account enabled trước khi phục vụ request, nên host chậm 21s được trả giá lúc boot (log sẽ thấy dòng refresh trong ~20s đầu) chứ không phải ở client đầu tiên.
+- Refresher quét **danh sách account đã cấu hình**, không phải danh sách key đã có trong cache — trước đây account mới thêm (hoặc cache còn rỗng) không bao giờ được nạp trước khi có client hỏi.
+- Account đang `failed` bị refresher bỏ qua (health loop lo việc hồi), tránh đập vào host đã biết là chết.
 - Làm mới nền mặc định **bật** (chu kỳ = TTL/2, sàn 1 giây) — trước đây trống nghĩa là tắt, khiến cache phục vụ danh sách cũ vô hạn.
 - Mỗi acc được làm mới bằng ngân sách timeout riêng của acc đó, nên một host chậm không làm cả vòng quét bị cắt.
 - Admin: `GET/POST/DELETE /api/admin/model-cache`; WebUI có thẻ "Cache mô hình" ở Dashboard.

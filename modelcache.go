@@ -235,17 +235,31 @@ func (c *modelCache) describe(key string) (map[string]any, bool) {
 
 // refreshModelCache re-fetches every cached key in the background. It is what
 // keeps a slow upstream's list warm without blocking callers.
+// refreshModelCache keeps every enabled account's list warm. It walks the
+// configured accounts rather than the cache keys: an entry created only on the
+// first client request would otherwise never be pre-warmed, and a freshly
+// configured account would stay cold until someone listed models.
 func (p *Proxy) refreshModelCache(ctx context.Context) {
 	if p.modelCache == nil {
 		return
 	}
-	for _, key := range p.modelCache.keys() {
-		a := p.accountByKey(key)
-		if a == nil || a.config.Disabled {
+	var wg sync.WaitGroup
+	for _, a := range p.accounts {
+		if a.config.Disabled {
 			continue
 		}
-		p.refreshModelEntry(ctx, a)
+		if status, _, _, _ := a.health.snapshot(); status == healthFailed {
+			// A failed account is retried by the health loop; refreshing here too
+			// would double the traffic against a host already known to be down.
+			continue
+		}
+		wg.Add(1)
+		go func(a *account) {
+			defer wg.Done()
+			p.refreshModelEntry(ctx, a)
+		}(a)
 	}
+	wg.Wait()
 }
 
 // refreshModelEntry fetches one account's list and stores it. The per-account
