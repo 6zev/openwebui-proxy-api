@@ -202,3 +202,58 @@ func TestResponsesCompletedCarriesOutputItems(t *testing.T) {
 		t.Errorf("function_call item wrong: %+v", call)
 	}
 }
+
+// Agents such as OpenMinis build the tool call purely from the stream: they wait
+// for response.output_item.added (a function_call item), then
+// response.function_call_arguments.delta, then response.output_item.done to
+// dispatch. Emitting only the terminal payload leaves them with an empty turn and
+// they retry until they report "the model returned no response after a tool
+// result".
+func TestResponsesStreamEmitsFunctionCallItems(t *testing.T) {
+	state, opening := newStreamState(surfaceResponses, "m")
+	var all strings.Builder
+	for _, event := range opening {
+		all.Write(event)
+	}
+	feed := func(payload string) {
+		out, _, err := state.convertChatStream([]byte(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range out {
+			all.Write(event)
+		}
+	}
+	feed(`{"id":"c1","choices":[{"delta":{"content":"let me look"}}]}`)
+	feed(`{"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}`)
+	feed(`{"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]}}]}`)
+	feed(`{"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`)
+
+	stream := all.String()
+	for _, want := range []string{
+		`"type":"response.output_item.added"`,
+		`"call_id":"call_1"`,
+		`"name":"lookup"`,
+		`"type":"response.function_call_arguments.delta"`,
+		`"type":"response.output_item.done"`,
+	} {
+		if !strings.Contains(stream, want) {
+			t.Errorf("stream missing %s:\n%s", want, stream)
+		}
+	}
+	// Both argument fragments arrive, in order, before the done event.
+	firstDelta := strings.Index(stream, `"delta":"{\"q\":"`)
+	secondDelta := strings.Index(stream, `"delta":"\"x\"}"`)
+	doneEvent := strings.LastIndex(stream, `"type":"response.output_item.done"`)
+	if firstDelta < 0 || secondDelta < 0 || !(firstDelta < secondDelta && secondDelta < doneEvent) {
+		t.Errorf("argument deltas out of order (first=%d second=%d done=%d):\n%s", firstDelta, secondDelta, doneEvent, stream)
+	}
+	// The text item closes before the function_call item opens.
+	textDone := strings.Index(stream, `"type":"response.output_text.done"`)
+	// The first output_item.added is the message item; the function_call item is
+	// the one that carries call_id.
+	callAdded := strings.Index(stream, `"call_id":"call_1"`)
+	if textDone < 0 || callAdded < 0 || textDone > callAdded {
+		t.Errorf("text item not closed before function_call opened (text=%d call=%d)", textDone, callAdded)
+	}
+}

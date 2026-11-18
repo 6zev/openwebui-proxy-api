@@ -582,13 +582,14 @@ type streamState struct {
 	tools     map[int]*toolBlockState
 	// itemOpen tracks the Responses output item, which needs its own add/done
 	// events around the text deltas.
-	itemOpen  bool
-	textBuf   strings.Builder
-	done      bool
-	promptTok int
-	compleTok int
-	totalTok  int
-	createdAt int64
+	itemOpen     bool
+	textItemDone map[string]any
+	textBuf      strings.Builder
+	done         bool
+	promptTok    int
+	compleTok    int
+	totalTok     int
+	createdAt    int64
 }
 
 type toolBlockState struct {
@@ -599,6 +600,8 @@ type toolBlockState struct {
 	// arguments accumulates the streamed JSON so the terminal Responses payload
 	// can carry a finished function_call item.
 	arguments strings.Builder
+	// itemID is the Responses output-item id for this call.
+	itemID string
 }
 
 // chatStreamChunk is the subset of a chat completion SSE chunk this layer reads.
@@ -690,6 +693,61 @@ func (st *streamState) openResponsesItem() [][]byte {
 	}
 }
 
+// textItemID is the stable id of the message item.
+func (st *streamState) textItemID() string { return st.itemID(0) }
+
+// functionItemID names a function_call output item. Responses clients key their
+// accumulator by this id, so it must be stable across the call's fragments.
+func (st *streamState) functionItemID(state *toolBlockState) string {
+	if state.itemID == "" {
+		if state.id != "" {
+			state.itemID = "fc_" + state.id
+		} else {
+			state.itemID = "fc_compat_" + itoa(state.block)
+		}
+	}
+	return state.itemID
+}
+
+// callID is the id the client echoes back when it replays the tool result.
+func (st *streamState) callID(state *toolBlockState) string {
+	if state.id != "" {
+		return state.id
+	}
+	return "call_compat_" + itoa(state.block)
+}
+
+// closeResponsesTextItem closes the message item and its content part before a
+// function_call item opens: a Responses stream carries one open item at a time.
+func (st *streamState) closeResponsesTextItem() [][]byte {
+	if !st.itemOpen {
+		return nil
+	}
+	out := [][]byte{
+		sseEvent("response.output_text.done", map[string]any{
+			"type": "response.output_text.done", "item_id": st.itemID(0),
+			"output_index": 0, "content_index": 0, "text": st.textBuf.String(),
+		}),
+		sseEvent("response.content_part.done", map[string]any{
+			"type": "response.content_part.done", "item_id": st.itemID(0), "output_index": 0, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": st.textBuf.String(), "annotations": []any{}},
+		}),
+		sseEvent("response.output_item.done", map[string]any{
+			"type": "response.output_item.done", "output_index": 0,
+			"item": map[string]any{
+				"type": "message", "id": st.itemID(0), "role": "assistant", "status": "completed",
+				"content": []map[string]any{{"type": "output_text", "text": st.textBuf.String(), "annotations": []any{}}},
+			},
+		}),
+	}
+	st.itemOpen = false
+	st.textItemDone = map[string]any{
+		"type": "message", "id": st.itemID(0), "role": "assistant", "status": "completed",
+		"content": []map[string]any{{"type": "output_text", "text": st.textBuf.String(), "annotations": []any{}}},
+	}
+	return out
+}
+
 // openTextBlock emits content_block_start for the text block, once.
 func (st *streamState) openTextBlock() [][]byte {
 	if st.textOpen {
@@ -772,10 +830,13 @@ func (st *streamState) toolDeltas(call streamToolCall) [][]byte {
 	if call.Index != nil {
 		index = *call.Index
 	}
-	if st.target != surfaceAnthropic {
-		// The Responses dialect reports tool calls as completed items, but the
-		// fragments still have to be recorded: the terminal payload must carry
-		// the finished function_call or the client sees no tool call at all.
+	if st.target == surfaceResponses {
+		// Responses clients build the tool call from the stream, not only from the
+		// terminal payload: they wait for response.output_item.added (a
+		// function_call item), then response.function_call_arguments.delta for the
+		// JSON, then response.output_item.done to dispatch it. Emitting only the
+		// payload leaves them with an empty turn — they then retry and finally
+		// report "the model returned no response after a tool result".
 		state := st.toolState(index)
 		if state.id == "" && call.ID != "" {
 			state.id = call.ID
@@ -783,10 +844,28 @@ func (st *streamState) toolDeltas(call streamToolCall) [][]byte {
 		if state.name == "" && call.Function.Name != "" {
 			state.name = call.Function.Name
 		}
+		var out [][]byte
+		if !state.started && state.name != "" {
+			state.started = true
+			// A function_call is its own output item; the text message item must
+			// be closed first so the client does not see two open items.
+			out = append(out, st.closeResponsesTextItem()...)
+			out = append(out, sseEvent("response.output_item.added", map[string]any{
+				"type": "response.output_item.added", "output_index": state.block,
+				"item": map[string]any{
+					"type": "function_call", "id": st.functionItemID(state),
+					"call_id": st.callID(state), "name": state.name, "arguments": "", "status": "in_progress",
+				},
+			}))
+		}
 		if call.Function.Arguments != "" {
 			state.arguments.WriteString(call.Function.Arguments)
+			out = append(out, sseEvent("response.function_call_arguments.delta", map[string]any{
+				"type": "response.function_call_arguments.delta", "item_id": st.functionItemID(state),
+				"output_index": state.block, "delta": call.Function.Arguments,
+			}))
 		}
-		return nil
+		return out
 	}
 	var out [][]byte
 	state, ok := st.tools[index]
@@ -887,49 +966,40 @@ func (st *streamState) finalEvents(finishReason string) [][]byte {
 		out = append(out, sseEvent("message_stop", map[string]any{"type": "message_stop"}))
 		return out
 	}
-	// Responses: close the item and its content part, then report the real
-	// usage on the terminal event.
+	// Responses: close every open item (text, then each function_call), then
+	// report the real usage on the terminal event.
 	var completedOutput []map[string]any
 	if st.itemOpen {
-		st.textOpen = false
-		out = append(out, sseEvent("response.output_text.done", map[string]any{
-			"type": "response.output_text.done", "item_id": st.itemID(0),
-			"output_index": 0, "content_index": 0, "text": st.textBuf.String(),
-		}))
-		out = append(out, sseEvent("response.content_part.done", map[string]any{
-			"type": "response.content_part.done", "item_id": st.itemID(0), "output_index": 0, "content_index": 0,
-			"part": map[string]any{"type": "output_text", "text": st.textBuf.String(), "annotations": []any{}},
-		}))
-		finalItem := map[string]any{
-			"type": "message", "id": st.itemID(0), "role": "assistant", "status": "completed",
-			"content": []map[string]any{{"type": "output_text", "text": st.textBuf.String(), "annotations": []any{}}},
-		}
-		out = append(out, sseEvent("response.output_item.done", map[string]any{
-			"type": "response.output_item.done", "output_index": 0, "item": finalItem,
-		}))
-		completedOutput = append(completedOutput, finalItem)
-		st.itemOpen = false
+		out = append(out, st.closeResponsesTextItem()...)
+	}
+	// The text item may already be closed (a function_call opened after it), but
+	// the terminal payload still has to list it.
+	if st.textItemDone != nil {
+		completedOutput = append(completedOutput, st.textItemDone)
 	}
 	for _, block := range st.sortedTools() {
 		arguments := block.arguments.String()
 		if strings.TrimSpace(arguments) == "" {
 			arguments = "{}"
 		}
-		id := block.id
-		if id == "" {
-			id = "call_compat_" + itoa(block.block)
-		}
-		completedOutput = append(completedOutput, map[string]any{
-			"type": "function_call", "id": id, "call_id": id,
+		itemID := st.functionItemID(block)
+		callID := st.callID(block)
+		item := map[string]any{
+			"type": "function_call", "id": itemID, "call_id": callID,
 			"name": block.name, "arguments": arguments, "status": "completed",
-		})
-	}
-	status := "completed"
-	if finishReason == "length" {
-		status = "incomplete"
+		}
+		out = append(out, sseEvent("response.output_item.done", map[string]any{
+			"type": "response.output_item.done", "output_index": block.block, "item": item,
+		}))
+		completedOutput = append(completedOutput, item)
 	}
 	if completedOutput == nil {
 		completedOutput = []map[string]any{}
+	}
+	// A finish_reason of "length" means the answer was cut short.
+	status := "completed"
+	if finishReason == "length" {
+		status = "incomplete"
 	}
 	out = append(out, sseEvent("response.completed", map[string]any{
 		"type": "response.completed",
