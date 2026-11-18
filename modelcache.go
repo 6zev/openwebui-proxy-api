@@ -408,9 +408,25 @@ func ageSeconds(t time.Time) string {
 // state is "" when there is nothing cached at all (a miss upstream), "hit" when
 // every candidate has a fresh entry, and "stale" when at least one entry is
 // expired (the caller still gets a usable list and a refresh runs behind it).
-func (p *Proxy) mergedModelList(candidates []*account) ([]cachedModel, time.Time, string) {
+// modelListState describes what a merged listing could cover.
+type modelListState struct {
+	models   []cachedModel
+	fetched  time.Time
+	state    string // "" when nothing at all is cached
+	missing  []*account
+	anyStale bool
+}
+
+// mergedModelList builds the listing a caller should see: the union of every
+// candidate account's models.
+//
+// Candidates without a cached entry are reported in missing rather than silently
+// skipped: the union would otherwise depend on which account happened to be
+// warmed, which is exactly how the listing flapped between two websites.
+func (p *Proxy) mergedModelList(candidates []*account) modelListState {
+	result := modelListState{}
 	if p.modelCache == nil || len(candidates) == 0 {
-		return nil, time.Time{}, ""
+		return result
 	}
 	merged := make([]cachedModel, 0, 64)
 	// A model id that exists on several websites must be listed once per owner:
@@ -418,35 +434,30 @@ func (p *Proxy) mergedModelList(candidates []*account) ([]cachedModel, time.Time
 	// entry silently hides the second site and sends chats to whichever account
 	// round-robin picks — which then answers "Model not found" for a model that
 	// really does exist elsewhere.
-	//
-	// With MODEL_PREFIX the id is already qualified by website, so the plain id is
-	// unique. Without it, the same bare id may repeat per website; that is the
-	// price of an unqualified namespace, and the caller can disambiguate with
-	// X-Website-ID.
 	seen := make(map[string]bool, 64)
-	var newest time.Time
-	covered, anyStale := 0, false
+	covered := 0
 	for _, a := range candidates {
 		key := accountKey(a.config.WebsiteID, a.config.ID)
 		models, fetchedAt, ok := p.modelCache.get(key)
 		if !ok {
 			if staleModels, staleAt, staleOK := p.modelCache.peek(key); staleOK {
 				models, fetchedAt = staleModels, staleAt
-				anyStale = true
+				result.anyStale = true
 				ok = true
 			}
 		}
 		if !ok {
+			result.missing = append(result.missing, a)
 			continue
 		}
 		covered++
-		if fetchedAt.After(newest) {
-			newest = fetchedAt
+		if fetchedAt.After(result.fetched) {
+			result.fetched = fetchedAt
 		}
 		for _, model := range models {
 			// Qualify by website while merging so two sites that list the same model
-			// both survive the union. Without MODEL_PREFIX the id is listed bare, so
-			// the qualified key only prevents collapsing duplicates.
+			// both survive the union. A NUL byte cannot appear in an id, so the
+			// qualifier can never collide with a real model name or leak into output.
 			qualifier := ""
 			if a.config.WebsiteID != "" {
 				qualifier = a.config.WebsiteID + "\x00"
@@ -459,12 +470,20 @@ func (p *Proxy) mergedModelList(candidates []*account) ([]cachedModel, time.Time
 		}
 	}
 	if covered == 0 {
-		return nil, time.Time{}, ""
+		return result
 	}
-	if anyStale {
-		return merged, newest, "stale"
+	result.models = merged
+	switch {
+	case result.anyStale:
+		result.state = "stale"
+	case len(result.missing) > 0:
+		// Partially warm: callers still get what they can reach, but the cache is
+		// flagged partial and the missing accounts are fetched behind them.
+		result.state = "partial"
+	default:
+		result.state = "hit"
 	}
-	return merged, newest, "hit"
+	return result
 }
 
 // refreshAllCandidates refreshes every candidate's entry in the background, so a

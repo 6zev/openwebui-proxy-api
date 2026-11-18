@@ -749,28 +749,35 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// round-robin deployment does not advertise one website's models on one call
 	// and another website's on the next.
 	if models && p.modelCache != nil {
-		if merged, fetchedAt, state := p.mergedModelList(candidates); state != "" {
-			if state == "stale" {
+		list := p.mergedModelList(candidates)
+		if len(list.missing) > 0 {
+			// A partial union is not served: the caller would see only some of the
+			// websites, and the missing set could change between calls. Warm what is
+			// missing first, then answer from the complete union.
+			p.primeCandidateLists(ctx, candidates)
+			list = p.mergedModelList(candidates)
+		}
+		if list.state != "" {
+			w.Header().Set("X-Model-Cache", list.state)
+			if !list.fetched.IsZero() {
+				w.Header().Set("X-Model-Cache-Age", ageSeconds(list.fetched))
+			}
+			writeModelList(w, list.models, p.modelPrefixFor(r, candidates))
+			if list.anyStale {
 				go p.refreshAllCandidates(context.WithoutCancel(r.Context()), candidates)
 			}
-			w.Header().Set("X-Model-Cache", state)
-			if !fetchedAt.IsZero() {
-				w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
-			}
-			writeModelList(w, merged, p.modelPrefixFor(r, candidates))
 			return
 		}
 		w.Header().Set("X-Model-Cache", "miss")
-		// Nothing is cached yet: fetch every candidate up front so the first
-		// answer already covers all reachable models (a round-robin chat may be
-		// routed to any of them). Subsequent calls are served from cache.
+		// Nothing is cached yet: fetch every candidate up front so the first answer
+		// already covers all reachable models.
 		p.primeCandidateLists(ctx, candidates)
-		if merged, fetchedAt, state := p.mergedModelList(candidates); state != "" {
-			w.Header().Set("X-Model-Cache", state)
-			if !fetchedAt.IsZero() {
-				w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
+		if list = p.mergedModelList(candidates); list.state != "" {
+			w.Header().Set("X-Model-Cache", list.state)
+			if !list.fetched.IsZero() {
+				w.Header().Set("X-Model-Cache-Age", ageSeconds(list.fetched))
 			}
-			writeModelList(w, merged, p.modelPrefixFor(r, candidates))
+			writeModelList(w, list.models, p.modelPrefixFor(r, candidates))
 			return
 		}
 	}
@@ -833,13 +840,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if models && p.modelCache != nil {
-			if stale, fetchedAt, state := p.mergedModelList(candidates); state != "" && state != "expired" {
+			if list := p.mergedModelList(candidates); list.state != "" {
 				// Every account failed, but a previously served list is better
 				// than an error: the client can still pick a model and retry.
 				w.Header().Set("X-Model-Cache", "stale-error")
-				w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
+				w.Header().Set("X-Model-Cache-Age", ageSeconds(list.fetched))
 				w.Header().Set("X-Cache-Error", "upstream-failed")
-				writeModelList(w, stale, p.modelPrefixFor(r, candidates))
+				writeModelList(w, list.models, p.modelPrefixFor(r, candidates))
 				return
 			}
 		}
@@ -889,9 +896,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.modelCache.putCost(accountKey(served.config.WebsiteID, served.config.ID), cached, time.Since(started))
 			w.Header().Set("X-Model-Cache", "miss")
 		}
-		// Other candidates may still have warm or stale entries; merge them in so
-		// the caller sees the full set of models it can reach.
-		merged, _, _ := p.mergedModelList(candidates)
+		// Other candidates may still be cold; fetch them before answering so the
+		// caller sees the full set of models it can reach, not just this account's.
+		p.primeCandidateLists(ctx, candidates)
+		list := p.mergedModelList(candidates)
+		merged := list.models
 		if len(merged) == 0 {
 			merged = cached
 		}

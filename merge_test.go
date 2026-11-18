@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -108,5 +109,58 @@ func TestModelListPinnedAccountUnchanged(t *testing.T) {
 	requireProxyStatus(t, resp, 200)
 	if !strings.Contains(resp.body, "only-b") || strings.Contains(resp.body, "only-a") {
 		t.Errorf("pinned listing wrong: %s", resp.body)
+	}
+}
+
+// The listing must not depend on which account happened to be warm: a cache that
+// holds only one website's entry must be completed before answering, otherwise
+// callers see website A on one call and website B on the next.
+func TestModelListNeverServedPartial(t *testing.T) {
+	upstreamA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auths/signin" {
+			_, _ = io.WriteString(w, `{"token":"ta"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":[{"id":"only-a"}]}`)
+	}))
+	defer upstreamA.Close()
+	upstreamB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auths/signin" {
+			_, _ = io.WriteString(w, `{"token":"tb"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":[{"id":"only-b"}]}`)
+	}))
+	defer upstreamB.Close()
+
+	cfg := Config{
+		APIKey: testProxyKey, Timeout: 5 * time.Second, Cooldown: time.Second,
+		ModelCacheTTL: time.Minute,
+		Websites: []WebsiteConfig{
+			{ID: "site-a", BaseURL: upstreamA.URL},
+			{ID: "site-b", BaseURL: upstreamB.URL},
+		},
+		Accounts: []AccountConfig{
+			{ID: "acc-a", WebsiteID: "site-a", Email: "a@example.test", Password: "pa"},
+			{ID: "acc-b", WebsiteID: "site-b", Email: "b@example.test", Password: "pb"},
+		},
+	}
+	p, err := NewProxy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Warm only one account, as a single early request or a refresher tick would.
+	p.refreshModelEntry(context.Background(), p.accounts[0])
+	if list := p.mergedModelList(p.accounts); len(list.missing) != 1 {
+		t.Fatalf("expected one missing account, got %d", len(list.missing))
+	}
+
+	s := newProxyTestServer(t, cfg)
+	for i := 0; i < 4; i++ {
+		resp := proxyTestRequest(t, s, http.MethodGet, "/v1/models", "", testProxyKey, "")
+		requireProxyStatus(t, resp, 200)
+		if !strings.Contains(resp.body, "only-a") || !strings.Contains(resp.body, "only-b") {
+			t.Fatalf("call %d served a partial listing: %s", i, resp.body)
+		}
 	}
 }

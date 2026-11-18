@@ -189,6 +189,7 @@ DEBUG_LOG=1                      # log chẩn đoán: mỗi lời gọi upstream
 
 - Chỉ cache `/v1/models`; chat/completions **không bao giờ** phát lại từ cache.
 - Cache theo khóa `<website-id>/<account-id>` nên hai web trùng ID acc không lẫn nhau.
+- **Không bao giờ trả danh sách thiếu**: nếu một candidate chưa có entry trong cache, proxy nạp nốt (song song) rồi mới trả hợp đầy đủ — trước đây entry thiếu bị bỏ qua im lặng nên danh sách đảo giữa hai website tuỳ acc nào đã warm.
 - **`/v1/models` trả HỢP của mọi account ứng viên**, không chỉ account mà round-robin vừa chọn. Trước đây mỗi lần gọi lại thấy một website khác nhau vì danh sách chỉ lấy từ candidate đầu tiên. Lần gọi đầu (cache lạnh) nạp song song tất cả account; sau đó phục vụ từ cache. Ghim `X-Account-ID` thì vẫn chỉ trả model của account đó.
 - Response có header `X-Model-Cache: hit|stale|stale-error|miss` và `X-Model-Cache-Age` (giây) để debug.
 - **Hết TTL không bị chặn**: bản cũ được trả ngay với `stale` kèm cờ `X-Model-Cache-Age`, đồng thời một lần fetch nền chạy song song (một fetch cho mỗi acc, các request dồn dập không nhân lên). Request sau nhận `hit`.
