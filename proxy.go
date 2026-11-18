@@ -753,29 +753,35 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), p.requestTimeout(candidates))
 	defer cancel()
-	// Serve a fresh cached model list before touching (possibly very slow)
-	// upstreams. Only /v1/models is cached; chat is never replayed from cache.
+	// Serve the cached model list before touching (possibly very slow) upstreams.
+	// The listing covers every candidate account a chat may be routed to, so a
+	// round-robin deployment does not advertise one website's models on one call
+	// and another website's on the next.
 	if models && p.modelCache != nil {
-		key := modelCacheKeyFor(candidates)
-		if cached, fetchedAt, ok := p.modelCache.get(key); ok {
-			w.Header().Set("X-Model-Cache", "hit")
-			w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
-			writeModelList(w, cached, p.modelPrefixFor(r, candidates))
-			return
-		}
-		// Expired entry: serve it immediately and refresh behind the caller, so a
-		// slow upstream is never on the request path. The caller sees
-		// X-Model-Cache: stale and the age, and the next request gets a hit.
-		if stale, fetchedAt, ok := p.modelCache.peek(key); ok {
-			w.Header().Set("X-Model-Cache", "stale")
-			w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
-			writeModelList(w, stale, p.modelPrefixFor(r, candidates))
-			if a := candidates[0]; a != nil {
-				go p.refreshModelEntry(context.WithoutCancel(r.Context()), a)
+		if merged, fetchedAt, state := p.mergedModelList(candidates); state != "" {
+			if state == "stale" {
+				go p.refreshAllCandidates(context.WithoutCancel(r.Context()), candidates)
 			}
+			w.Header().Set("X-Model-Cache", state)
+			if !fetchedAt.IsZero() {
+				w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
+			}
+			writeModelList(w, merged, p.modelPrefixFor(r, candidates))
 			return
 		}
 		w.Header().Set("X-Model-Cache", "miss")
+		// Nothing is cached yet: fetch every candidate up front so the first
+		// answer already covers all reachable models (a round-robin chat may be
+		// routed to any of them). Subsequent calls are served from cache.
+		p.primeCandidateLists(ctx, candidates)
+		if merged, fetchedAt, state := p.mergedModelList(candidates); state != "" {
+			w.Header().Set("X-Model-Cache", state)
+			if !fetchedAt.IsZero() {
+				w.Header().Set("X-Model-Cache-Age", ageSeconds(fetchedAt))
+			}
+			writeModelList(w, merged, p.modelPrefixFor(r, candidates))
+			return
+		}
 	}
 	// Open WebUI paths; LibreChat accounts translate these per account because
 	// the two backends expose different route families for the same surface.
@@ -789,6 +795,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	started := time.Now()
 	var response *http.Response
+	var served *account
 	selectedPrefix := ""
 	for _, a := range candidates {
 		if ctx.Err() != nil {
@@ -826,6 +833,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var retry bool
 		response, err, retry = p.requestWithHeaders(ctx, a, accountPath, method, body, extra)
 		if err == nil {
+			served = a
 			break
 		}
 		if r.Header.Get("X-Account-ID") != "" || !retry {
@@ -834,7 +842,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if models && p.modelCache != nil {
-			if stale, fetchedAt, ok := p.modelCache.peek(modelCacheKeyFor(candidates)); ok {
+			if stale, fetchedAt, state := p.mergedModelList(candidates); state != "" && state != "expired" {
 				// Every account failed, but a previously served list is better
 				// than an error: the client can still pick a model and retry.
 				w.Header().Set("X-Model-Cache", "stale-error")
@@ -885,11 +893,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if p.modelCache != nil {
 			// Record what this fetch cost, so an expensive upstream is not
-			// re-queried on the base TTL (a 21s list re-fetched every 5 minutes).
-			p.modelCache.putCost(modelCacheKeyFor(candidates), cached, time.Since(started))
+			// re-queried on the base TTL (a 21s list re-fetched every 5 minutes),
+			// and keep it under the account that actually answered.
+			p.modelCache.putCost(accountKey(served.config.WebsiteID, served.config.ID), cached, time.Since(started))
 			w.Header().Set("X-Model-Cache", "miss")
 		}
-		writeModelList(w, cached, selectedPrefix)
+		// Other candidates may still have warm or stale entries; merge them in so
+		// the caller sees the full set of models it can reach.
+		merged, _, _ := p.mergedModelList(candidates)
+		if len(merged) == 0 {
+			merged = cached
+		}
+		writeModelList(w, merged, selectedPrefix)
 		return
 	}
 	contentType := response.Header.Get("Content-Type")

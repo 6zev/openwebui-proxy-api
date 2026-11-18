@@ -382,3 +382,101 @@ func writeModelList(w http.ResponseWriter, models []cachedModel, prefix string) 
 func ageSeconds(t time.Time) string {
 	return strconv.FormatInt(int64(time.Since(t)/time.Second), 10)
 }
+
+// mergedModelList builds the listing a caller should see: the union of every
+// candidate account's models, de-duplicated by model id.
+//
+// The old code served candidates[0] only, and round-robin rotates that index on
+// every request — so a deployment with two websites advertised one site's models
+// on one call and the other site's on the next. A chat selects its account from
+// the same candidate set, so any model shown here must be reachable.
+//
+// state is "" when there is nothing cached at all (a miss upstream), "hit" when
+// every candidate has a fresh entry, and "stale" when at least one entry is
+// expired (the caller still gets a usable list and a refresh runs behind it).
+func (p *Proxy) mergedModelList(candidates []*account) ([]cachedModel, time.Time, string) {
+	if p.modelCache == nil || len(candidates) == 0 {
+		return nil, time.Time{}, ""
+	}
+	merged := make([]cachedModel, 0, 64)
+	seen := make(map[string]bool, 64)
+	var newest time.Time
+	covered, anyStale := 0, false
+	for _, a := range candidates {
+		key := accountKey(a.config.WebsiteID, a.config.ID)
+		models, fetchedAt, ok := p.modelCache.get(key)
+		if !ok {
+			if staleModels, staleAt, staleOK := p.modelCache.peek(key); staleOK {
+				models, fetchedAt = staleModels, staleAt
+				anyStale = true
+				ok = true
+			}
+		}
+		if !ok {
+			continue
+		}
+		covered++
+		if fetchedAt.After(newest) {
+			newest = fetchedAt
+		}
+		for _, model := range models {
+			// The prefix varies per website, so key on the bare id plus owner to
+			// keep two websites' same-named models distinct in "account" mode.
+			id := model.ID
+			if p.config.ModelPrefix && a.config.WebsiteID != "" {
+				id = a.config.WebsiteID + "/" + model.ID
+			}
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			merged = append(merged, model)
+		}
+	}
+	if covered == 0 {
+		return nil, time.Time{}, ""
+	}
+	if anyStale {
+		return merged, newest, "stale"
+	}
+	return merged, newest, "hit"
+}
+
+// primeCandidateLists fetches every candidate that has no cached entry, in
+// parallel. It is used on a cold start so the first model listing is complete
+// instead of showing only the account round-robin happened to pick.
+func (p *Proxy) primeCandidateLists(ctx context.Context, candidates []*account) {
+	if p.modelCache == nil {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, a := range candidates {
+		key := accountKey(a.config.WebsiteID, a.config.ID)
+		if _, _, ok := p.modelCache.get(key); ok {
+			continue
+		}
+		if _, _, ok := p.modelCache.peek(key); ok {
+			continue
+		}
+		if a.config.Disabled {
+			continue
+		}
+		wg.Add(1)
+		go func(a *account) {
+			defer wg.Done()
+			p.refreshModelEntry(ctx, a)
+		}(a)
+	}
+	wg.Wait()
+}
+
+// refreshAllCandidates refreshes every candidate's entry in the background, so a
+// stale union becomes a fresh union for the next caller.
+func (p *Proxy) refreshAllCandidates(ctx context.Context, candidates []*account) {
+	for _, a := range candidates {
+		if a.config.Disabled {
+			continue
+		}
+		p.refreshModelEntry(ctx, a)
+	}
+}
