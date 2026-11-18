@@ -33,6 +33,10 @@ type cachedModel struct {
 	ID      string `json:"id"`
 	Created int64  `json:"created"`
 	OwnedBy string `json:"owned_by"`
+	// Website is set while merging: each model belongs to the website whose
+	// account listed it, so the rendered id can be qualified per model instead of
+	// stamping one website's prefix onto the whole union.
+	Website string `json:"-"`
 }
 
 type modelCache struct {
@@ -325,6 +329,9 @@ func (p *Proxy) accountByKey(key string) *account {
 }
 
 // fetchModelList performs the upstream /models call and parses the list.
+// fetchModelList performs the upstream /models call and parses the list.
+// The returned models carry no Website tag: it is assigned while merging, so a
+// cached batch stays the account's own data.
 func (p *Proxy) fetchModelList(ctx context.Context, a *account) ([]cachedModel, error) {
 	path := "/api/models"
 	if a.config.Backend == BackendLibreChat {
@@ -380,11 +387,20 @@ func (p *Proxy) modelPrefixFor(r *http.Request, candidates []*account) string {
 	return first.config.WebsiteID
 }
 
-// writeModelList renders the OpenAI model list, adding the routing prefix.
-func writeModelList(w http.ResponseWriter, models []cachedModel, prefix string) {
+// writeModelList renders the OpenAI model list. With prefixing on, each model is
+// qualified by the website that owns it: a single prefix taken from candidates[0]
+// would label every website's models with one website's name, which is how
+// "ai.baselgovernance.org/gpt-5.6-luna" appeared for a model only kaethegpt
+// serves. fallback is used for models that carry no website (single-account and
+// pinned listings).
+func writeModelList(w http.ResponseWriter, models []cachedModel, fallback string) {
 	out := make([]map[string]any, 0, len(models))
 	for _, m := range models {
 		id := m.ID
+		prefix := m.Website
+		if prefix == "" {
+			prefix = fallback
+		}
 		if prefix != "" {
 			id = prefix + "/" + m.ID
 		}
@@ -466,6 +482,7 @@ func (p *Proxy) mergedModelList(candidates []*account) modelListState {
 				continue
 			}
 			seen[qualifier+model.ID] = true
+			model.Website = a.config.WebsiteID
 			merged = append(merged, model)
 		}
 	}

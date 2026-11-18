@@ -280,6 +280,7 @@ Proxy tự probe từng acc định kỳ để loại acc chết/đăng nhập h
 Bật `MODEL_PREFIX=1` thì danh sách model trả ID dạng `"<website-id>/<model>"` (hoặc `"<acc-id>/<model>"` nếu ghim acc), để một OpenAI client gọi `model: "ai/openai/gpt-5.6-luna"` là tự chọn đúng website/acc **mà không cần header** `X-Website-ID`/`X-Account-ID`.
 
 - **Prefix mặc định là website id**: `MODEL_PREFIX=1` trả `"<website-id>/<model>"`; khi caller ghim `X-Account-ID` thì prefix đổi sang `<acc-id>`.
+- **Mỗi model mang prefix của web sở hữu nó**, không phải prefix của account đầu tiên trong danh sách ứng viên. Trước đây model của web B bị gắn tên web A (`ai.baselgovernance.org/gpt-5.6-luna` trong khi chỉ `kaethegpt.duckdns.org/gpt-5.6-luna` tồn tại) và gọi vào sẽ 400 `Model not found`.
 - Prefix phải khớp ID của acc hoặc website **đã đăng ký**; model ID chứa slash (như `openai/gpt-5.6`) thì giữ nguyên. Một helper duy nhất (`stripRoutingPrefix`) làm việc này cho cả danh sách lẫn chat, nên không còn cảnh vừa thấy `site-a/openai/gpt-5` vừa thấy `site-a/gpt-5` (bản sau bị upstream trả `Model not found`).
 - Header do caller gửi luôn thắng; prefix chỉ áp dụng khi chưa có header.
 - Áp dụng cả `chat/completions`, `responses` và các body passthrough có trường `model`.
