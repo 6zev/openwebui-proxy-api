@@ -54,6 +54,9 @@ type Config struct {
 	// upstream error body. It never logs credentials: auth headers and the
 	// proxy keys are excluded by construction.
 	DebugLog bool
+	// LibreChatOrigin is sent as Origin/Referer when signing in to LibreChat.
+	// Empty means no Origin header, which LibreChat's requireSameOrigin accepts.
+	LibreChatOrigin string
 	// TranslateMissing adapts requests for upstreams that lack a standard API:
 	// a Responses or Anthropic Messages call is carried over chat completions
 	// when the upstream answers 404/405 for the native route. Off by default so
@@ -94,6 +97,10 @@ type account struct {
 	refreshLogged   time.Time
 	cooldownMu      sync.Mutex
 	cooldownUntil   time.Time
+	// sessionOnce/session hold the LibreChat JWT login state. Used only by
+	// accounts that have email/password instead of a static agent key.
+	sessionOnce sync.Once
+	session     *libreChatSession
 	// modelCooldown holds a per-model rejection (a provider behind Open WebUI can
 	// be out of credit while the others are fine). Keyed by model id, so a drained
 	// OpenAI balance does not take the account's working Claude models with it.
@@ -637,12 +644,17 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 		retry := ctx.Err() == nil && !isStoredErr(err) && !(errors.As(err, &e) && e.status == 429)
 		return nil, err, retry
 	}
-	staticKey := a.config.Backend == BackendLibreChat
+	// A static key cannot be refreshed; a session JWT can, so a 401 re-logins.
+	staticKey := a.config.Backend == BackendLibreChat && a.config.APIKey != ""
 	for attempt := 0; attempt < 2; attempt++ {
 		req, _ := http.NewRequestWithContext(ctx, method, a.config.BaseURL+path, bytes.NewReader(body))
 		req.Header.Set("Authorization", auth)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "*/*")
+		if a.config.Backend == BackendLibreChat && a.config.APIKey == "" {
+			// LibreChat records a violation for a non-browser User-Agent.
+			p.decorateLibreChatRequest(req)
+		}
 		for name, values := range extra {
 			for _, value := range values {
 				req.Header.Add(name, value)
@@ -669,7 +681,12 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 			}
 			a.mu.Unlock()
 			var refreshed string
-			refreshed, err = p.login(ctx, a)
+			if a.config.Backend == BackendLibreChat {
+				a.libreChatSessionFor().invalidate()
+				refreshed, err = p.libreChatToken(ctx, a)
+			} else {
+				refreshed, err = p.login(ctx, a)
+			}
 			if err != nil {
 				return nil, err, false
 			}
@@ -876,6 +893,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	candidates, err := p.candidatesForModel(r.Header.Get("X-Account-ID"), r.Header.Get("X-Website-ID"), requestModel(body))
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if chat && p.isSessionChat(candidates) {
+		// A LibreChat session account speaks the web UI's turn protocol, not OpenAI's
+		// chat completions. The prompt is extracted and the turn is run through
+		// libreChatChat, which starts the generation and follows its SSE stream.
+		p.serveLibreChatSessionChat(w, r, body, candidates)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), p.requestTimeout(candidates))
@@ -1181,5 +1205,170 @@ func (p *Proxy) forwardBody(w http.ResponseWriter, r *http.Request, body []byte,
 		// The upstream died mid-body. Abort the connection so the client sees a
 		// truncated transfer instead of a complete-looking short response.
 		panic(http.ErrAbortHandler)
+	}
+}
+
+// isSessionChat reports whether the first reachable candidate is a LibreChat
+// session account (email/password rather than a static agent key). Those accounts
+// need the web UI turn protocol, so they take a separate path.
+func (p *Proxy) isSessionChat(candidates []*account) bool {
+	if len(candidates) == 0 {
+		return false
+	}
+	first := candidates[0]
+	return first.config.Backend == BackendLibreChat && first.config.APIKey == ""
+}
+
+// serveLibreChatSessionChat runs one turn through a LibreChat session account and
+// answers in the OpenAI shape the caller asked for (JSON or SSE).
+//
+// The account loop still applies: a session account that refuses the turn is
+// parked and the next candidate is tried, but a turn that already started is never
+// replayed — the upstream may have persisted it.
+func (p *Proxy) serveLibreChatSessionChat(w http.ResponseWriter, r *http.Request, body []byte, candidates []*account) {
+	model, prompt, stream, err := chatPromptFromBody(body)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), p.requestTimeout(candidates))
+	defer cancel()
+	var lastErr error
+	for _, a := range candidates {
+		if a.config.Backend != BackendLibreChat || a.config.APIKey != "" {
+			// Mixed deployment: non-session accounts keep the passthrough path.
+			lastErr = &apiError{status: 501, message: "This account does not accept session chat; pin a LibreChat account with email/password, or use a model routed to it"}
+			continue
+		}
+		w.Header().Set("X-Account-ID", a.config.ID)
+		w.Header().Set("X-Website-ID", a.config.WebsiteID)
+		w.Header().Set("X-Compat-Mode", "librechat-session")
+		turn, chatErr := p.libreChatChat(ctx, a, prompt, model)
+		if chatErr != nil {
+			lastErr = chatErr
+			p.usage.record(a.config.WebsiteID, 0, model, chatErr.Error())
+			if r.Header.Get("X-Account-ID") != "" {
+				break
+			}
+			continue
+		}
+		p.usage.record(a.config.WebsiteID, 200, model, "")
+		writeLibreChatTurn(w, model, turn, stream)
+		return
+	}
+	if lastErr == nil {
+		lastErr = &apiError{status: 502, message: "No LibreChat session account was usable"}
+	}
+	writeError(w, lastErr)
+}
+
+// chatPromptFromBody extracts the model, a single prompt string and the stream flag
+// from an OpenAI chat-completions body. Session accounts take one user turn per
+// call, so a multi-turn history is flattened into a transcript the model can read;
+// nothing is invented and no state is kept across calls.
+func chatPromptFromBody(body []byte) (string, string, bool, error) {
+	var request struct {
+		Model    string `json:"model"`
+		Stream   bool   `json:"stream"`
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return "", "", false, &apiError{status: 400, message: "Invalid JSON body"}
+	}
+	if len(request.Messages) == 0 {
+		return "", "", false, &apiError{status: 400, message: "messages[] is required"}
+	}
+	var transcript strings.Builder
+	last := ""
+	for _, message := range request.Messages {
+		text := messageText(message.Content)
+		if text == "" {
+			continue
+		}
+		last = text
+		switch message.Role {
+		case "system":
+			transcript.WriteString("System: " + text + "\n")
+		case "assistant":
+			transcript.WriteString("Assistant: " + text + "\n")
+		default:
+			transcript.WriteString("User: " + text + "\n")
+		}
+	}
+	if last == "" {
+		return "", "", false, &apiError{status: 400, message: "messages[] carried no text content"}
+	}
+	// A single user turn is sent verbatim: LibreChat already has the conversation.
+	if len(request.Messages) == 1 && request.Messages[0].Role != "system" {
+		return request.Model, last, request.Stream, nil
+	}
+	return request.Model, strings.TrimSpace(transcript.String()), request.Stream, nil
+}
+
+// messageText flattens a message content value (string or part list).
+func messageText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) == nil {
+		var out strings.Builder
+		for _, part := range parts {
+			if part.Text != "" && (part.Type == "" || part.Type == "text") {
+				out.WriteString(part.Text)
+			}
+		}
+		return out.String()
+	}
+	return ""
+}
+
+// writeLibreChatTurn renders a completed turn in the shape the caller asked for.
+func writeLibreChatTurn(w http.ResponseWriter, model string, turn *libreChatTurn, stream bool) {
+	created := time.Now().Unix()
+	if !stream {
+		writeJSON(w, 200, map[string]any{
+			"id": "chatcmpl-lc", "object": "chat.completion", "created": created, "model": model,
+			"choices": []map[string]any{{
+				"index": 0, "finish_reason": "stop",
+				"message": map[string]any{"role": "assistant", "content": turn.Text},
+			}},
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(200)
+	flusher, _ := w.(http.Flusher)
+	chunk := map[string]any{
+		"id": "chatcmpl-lc", "object": "chat.completion.chunk", "created": created, "model": model,
+		"choices": []map[string]any{{
+			"index": 0, "delta": map[string]any{"role": "assistant", "content": turn.Text},
+		}},
+	}
+	if encoded, err := json.Marshal(chunk); err == nil {
+		fmt.Fprintf(w, "data: %s\n\n", encoded)
+	}
+	done := map[string]any{
+		"id": "chatcmpl-lc", "object": "chat.completion.chunk", "created": created, "model": model,
+		"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+	}
+	if encoded, err := json.Marshal(done); err == nil {
+		fmt.Fprintf(w, "data: %s\n\n", encoded)
+	}
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	if flusher != nil {
+		flusher.Flush()
 	}
 }

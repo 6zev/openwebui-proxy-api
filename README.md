@@ -287,11 +287,25 @@ Bật `MODEL_PREFIX=1` thì danh sách model trả ID dạng `"<website-id>/<mod
 
 - **Prefix mặc định là website id**: `MODEL_PREFIX=1` trả `"<website-id>/<model>"`; khi caller ghim `X-Account-ID` thì prefix đổi sang `<acc-id>`.
 - **Mỗi model mang prefix của web sở hữu nó**, không phải prefix của account đầu tiên trong danh sách ứng viên. Trước đây model của web B bị gắn tên web A (`ai.baselgovernance.org/gpt-5.6-luna` trong khi chỉ `kaethegpt.duckdns.org/gpt-5.6-luna` tồn tại) và gọi vào sẽ 400 `Model not found`.
-### LibreChat: vì sao bắt buộc Agent API key
+### LibreChat: hai kiểu credential, hai surface khác nhau
 
-`/api/agents/v1/*` **chỉ nhận agent API key**. Đăng nhập email/password có trả JWT (`POST /api/auth/login`, hạn 15 phút) nhưng JWT đó bị agents API từ chối bằng `invalid_api_key`; route duy nhất nhận JWT là `/api/agents/chat/completions` — endpoint của chính giao diện web, đòi body schema riêng (`agent_id`, `conversationId`, `parentMessageId`, và ba route chat/edit/continue khác nhau). Proxy **không** mô phỏng giao diện đó, nên acc LibreChat phải có agent API key; nhập email/password sẽ bị từ chối kèm lý do này thay vì lưu rồi lỗi sau.
+LibreChat không có một "API model" thẳng như Open WebUI. Có hai đường, và proxy hỗ trợ **cả hai**, chọn bằng kiểu credential của acc:
 
-Lấy key: LibreChat → **Settings → Data & Privacy → API keys → Agent API Keys** (role phải có quyền **Remote Agents**). Health probe của acc LibreChat gọi `/api/agents/v1/agents`; **401** ở đó nghĩa là key sai/bị thu hồi hoặc thiếu quyền, không phải thiếu route.
+| Credential | Đi tới | Dùng được cho |
+|---|---|---|
+| `api_key` (Agent API key) | `/api/agents/v1/*` | **Agent** đã định nghĩa sẵn. Không gọi thẳng model. |
+| `email` + `password` | Session web: `POST /api/auth/login` → JWT → `POST /api/agents/chat/completions` → `GET /api/agents/chat/stream/<streamId>` | **Model** bất kỳ trên instance, như giao diện web |
+
+Hai kiểu **không thay thế nhau**: Agents API từ chối JWT session (`invalid_api_key`), còn route chat UI không nhận agent key. Không được khai cả hai trên một acc (config sẽ bị từ chối).
+
+Session account cần biết:
+- JWT sống **15 phút**; proxy tự gia hạn (ưu tiên `POST /api/auth/refresh` bằng cookie `refreshToken`, hết hạn mới login lại).
+- Mọi request đều gửi **User-Agent giống browser** — LibreChat ghi violation nếu thiếu và đủ điểm sẽ **ban IP** (`BAN_DURATION`, mặc định 2 giờ).
+- Login bị từ chối (403 ban / sai mật khẩu) thì acc bị **tạm dừng 30 phút và KHÔNG retry** — mỗi lần thử là thêm một violation.
+- Lịch sử nhiều lượt được **làm phẳng thành transcript** gửi trong một lượt; proxy không giữ trạng thái hội thoại giữa các lần gọi.
+- `LIBRECHAT_ORIGIN` chỉ cần đặt khi instance bật kiểm `Origin` chặt (gửi kèm `Origin`/`Referer`).
+
+Lấy agent key: LibreChat → **Settings → Data & Privacy → API keys → Agent API Keys** (role cần quyền **Remote Agents**). Health probe của acc dùng agent key gọi `/api/agents/v1/agents`; **401** ở đó nghĩa là key sai/bị thu hồi hoặc thiếu quyền.
 
 - Prefix phải khớp ID của acc hoặc website **đã đăng ký**; model ID chứa slash (như `openai/gpt-5.6`) thì giữ nguyên. Một helper duy nhất (`stripRoutingPrefix`) làm việc này cho cả danh sách lẫn chat, nên không còn cảnh vừa thấy `site-a/openai/gpt-5` vừa thấy `site-a/gpt-5` (bản sau bị upstream trả `Model not found`).
 - Header do caller gửi luôn thắng; prefix chỉ áp dụng khi chưa có header.

@@ -59,16 +59,23 @@ func validateBackendAccount(a AccountConfig) error {
 		}
 		return nil
 	case BackendLibreChat:
-		// LibreChat authenticates every request with a static Agent API key.
-		//
-		// An email/password login does produce a JWT, but the Agents API rejects it
-		// with invalid_api_key, and the only route that accepts a session JWT
-		// (/api/agents/chat/completions) is the browser UI's own endpoint with its
-		// own body schema — carrying OpenAI payloads onto it would mean simulating
-		// the UI, which this proxy deliberately does not do. So the credentials are
-		// refused with that reason instead of being stored and failing later.
+		// Two credential shapes, deliberately:
+		//   - api_key:   the static Agent API key, for the Agents API (/api/agents/v1);
+		//   - email+password: a user session, which reaches MODELS the way the web UI
+		//     does (POST /api/agents/chat/completions + GET .../chat/stream/<id>).
+		// They are not interchangeable: the Agents API refuses a session JWT with
+		// invalid_api_key, and the chat UI route does not accept an agent key.
 		if strings.TrimSpace(a.Email) != "" || a.Password != "" {
-			return errors.New("librechat accounts use api_key only: a session JWT is refused by /api/agents/v1 (invalid_api_key) and the chat UI route needs LibreChat's own body schema")
+			if strings.TrimSpace(a.Email) == "" || a.Password == "" {
+				return errors.New("librechat session accounts need both email and password")
+			}
+			if len(a.Email) > 320 || len(a.Password) > 8192 {
+				return errors.New("librechat account email or password is too long")
+			}
+			if a.APIKey != "" {
+				return errors.New("librechat account carries both api_key and email/password; pick one: api_key for the Agents API, email/password for the web chat session")
+			}
+			return nil
 		}
 		if len(a.APIKey) < minLibreChatAPIKeyLength {
 			return errors.New("librechat accounts require an api_key")
@@ -105,12 +112,15 @@ func newBackendClient(a AccountConfig, timeout time.Duration) (*http.Client, err
 func backendAuthHeader(ctx context.Context, p *Proxy, a *account) (string, error) {
 	switch normalizeBackend(a.config.Backend) {
 	case BackendLibreChat:
-		if a.config.APIKey == "" {
-			// Explain the options instead of a bare 502: an email/password pair
-			// cannot stand in for the key (see validateBackendAccount).
-			return "", &apiError{status: 502, message: "LibreChat account is missing its Agent API key — create one in LibreChat → Settings → Data & Privacy → API keys → Agent API Keys (needs the Remote Agents permission)", quota: false}
+		if a.config.APIKey != "" {
+			return "Bearer " + a.config.APIKey, nil
 		}
-		return "Bearer " + a.config.APIKey, nil
+		// Session account: trade email/password for a JWT (renewed automatically).
+		token, err := p.libreChatToken(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return "Bearer " + token, nil
 	case BackendOpenWebUI:
 		token, err := p.login(ctx, a)
 		if err != nil {

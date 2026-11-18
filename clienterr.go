@@ -22,8 +22,9 @@ func upstreamDetail(raw []byte) string {
 		return ""
 	}
 	var envelope struct {
-		Detail json.RawMessage `json:"detail"`
-		Error  json.RawMessage `json:"error"`
+		Detail  json.RawMessage `json:"detail"`
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return ""
@@ -31,7 +32,12 @@ func upstreamDetail(raw []byte) string {
 	if text := detailText(envelope.Detail); text != "" {
 		return text
 	}
-	return detailText(envelope.Error)
+	if text := detailText(envelope.Error); text != "" {
+		return text
+	}
+	// LibreChat answers 403 with {"message":"Your account has been temporarily
+	// banned due to violations of our service."} — no detail, no error object.
+	return sanitizeDetail(envelope.Message)
 }
 
 // detailText accepts the shapes seen in the wild: a plain string, an object with

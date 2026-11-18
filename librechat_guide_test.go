@@ -14,40 +14,25 @@ import (
 
 // An account without an agent key must say what to do, not just 502. A LibreChat
 // session JWT cannot substitute: /api/agents/v1 answers invalid_api_key for it.
-func TestLibreChatMissingKeyExplainsTheFix(t *testing.T) {
-	cfg := Config{
-		APIKey: testProxyKey, Timeout: 2 * time.Second,
-		Websites: []WebsiteConfig{{ID: "site-lc", BaseURL: "http://127.0.0.1:1"}},
-		Accounts: []AccountConfig{{ID: "lc", WebsiteID: "site-lc", Backend: BackendLibreChat, APIKey: "agent-key-value"}},
+// Both credential shapes are valid, and carrying both at once is not: the shapes
+// reach different LibreChat surfaces.
+func TestLibreChatCredentialShapes(t *testing.T) {
+	if err := validateBackendAccount(AccountConfig{ID: "lc", Backend: BackendLibreChat, APIKey: "agent-key-value"}); err != nil {
+		t.Errorf("agent key rejected: %v", err)
 	}
-	p, err := NewProxy(cfg)
-	if err != nil {
-		t.Fatal(err)
+	if err := validateBackendAccount(AccountConfig{ID: "lc", Backend: BackendLibreChat, Email: "a@b.test", Password: "pw"}); err != nil {
+		t.Errorf("email/password rejected: %v", err)
 	}
-	// Force the guard by clearing the key on the live account, as a stale config
-	// would: validation runs at construction, this path must still explain itself.
-	p.accounts[0].config.APIKey = ""
-	_, err = backendAuthHeader(context.Background(), p, p.accounts[0])
+	if err := validateBackendAccount(AccountConfig{ID: "lc", Backend: BackendLibreChat}); err == nil {
+		t.Error("account with no credentials accepted")
+	}
+	err := validateBackendAccount(AccountConfig{ID: "lc", Backend: BackendLibreChat, APIKey: "agent-key-value", Email: "a@b.test", Password: "pw"})
 	if err == nil {
-		t.Fatal("expected an error without an agent key")
+		t.Fatal("both credential shapes accepted")
 	}
-	message := err.Error()
-	for _, want := range []string{"Agent API key", "Settings", "Remote Agents"} {
-		if !strings.Contains(message, want) {
-			t.Errorf("message does not explain how to fix it (missing %q): %s", want, message)
-		}
-	}
-}
-
-// Email/password is refused with a reason that names the real obstacle.
-func TestLibreChatSessionCredentialsRejectedWithReason(t *testing.T) {
-	err := validateBackendAccount(AccountConfig{ID: "lc", Backend: BackendLibreChat, Email: "a@b.test", Password: "x"})
-	if err == nil {
-		t.Fatal("session credentials accepted for the agents backend")
-	}
-	for _, want := range []string{"invalid_api_key", "api_key only", "body schema"} {
+	for _, want := range []string{"api_key", "email/password", "pick one"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Errorf("refusal does not explain why (missing %q): %s", want, err)
+			t.Errorf("refusal does not explain the conflict (missing %q): %s", want, err)
 		}
 	}
 }
