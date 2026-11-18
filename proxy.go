@@ -964,6 +964,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("X-Account-ID", a.config.ID)
 		w.Header().Set("X-Website-ID", a.config.WebsiteID)
+		if chat {
+			// Streaming chat reports no token counts unless include_usage is set;
+			// clients show usage and tokens/second from it.
+			body = ensureStreamUsage(body)
+		}
 		var retry bool
 		response, err, retry = p.requestWithHeaders(ctx, a, accountPath, method, body, extra)
 		if err == nil {

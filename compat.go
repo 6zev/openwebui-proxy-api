@@ -589,7 +589,10 @@ type streamState struct {
 	promptTok    int
 	compleTok    int
 	totalTok     int
-	createdAt    int64
+	// sawUsage records that the upstream reported real counts, so a zero is known
+	// to be genuine rather than missing data.
+	sawUsage  bool
+	createdAt int64
 }
 
 type toolBlockState struct {
@@ -693,6 +696,22 @@ func (st *streamState) openResponsesItem() [][]byte {
 	}
 }
 
+// usageCounts returns what the terminal event should report. When the upstream
+// sent no usage (a chat-completions stream without include_usage), zeroes would
+// make a client show "0 tokens" as if nothing happened; a character-based
+// estimate is honest enough for a token counter and never claims precision it
+// does not have.
+func (st *streamState) usageCounts() (int, int) {
+	if st.sawUsage {
+		return st.promptTok, st.compleTok
+	}
+	completion := (st.textBuf.Len() + 3) / 4
+	for _, block := range st.tools {
+		completion += (block.arguments.Len() + 3) / 4
+	}
+	return 0, completion
+}
+
 // textItemID is the stable id of the message item.
 func (st *streamState) textItemID() string { return st.itemID(0) }
 
@@ -785,6 +804,7 @@ func (st *streamState) convertChatStream(chatEvent []byte) ([][]byte, bool, erro
 		st.promptTok = chunk.Usage.PromptTokens
 		st.compleTok = chunk.Usage.CompletionTokens
 		st.totalTok = chunk.Usage.TotalTokens
+		st.sawUsage = true
 	}
 	var out [][]byte
 	// Non-choices chunks (pure usage report) still have to advance nothing.
@@ -795,6 +815,10 @@ func (st *streamState) convertChatStream(chatEvent []byte) ([][]byte, bool, erro
 			out = append(out, st.toolDeltas(call)...)
 		}
 		if delta.Content != "" {
+			// Both dialects accumulate the text: it feeds the Responses message item
+			// and the usage estimate, so an Anthropic client is not told it received
+			// zero tokens.
+			st.textBuf.WriteString(delta.Content)
 			switch st.target {
 			case surfaceAnthropic:
 				out = append(out, st.openTextBlock()...)
@@ -804,7 +828,6 @@ func (st *streamState) convertChatStream(chatEvent []byte) ([][]byte, bool, erro
 				}))
 			case surfaceResponses:
 				out = append(out, st.openResponsesItem()...)
-				st.textBuf.WriteString(delta.Content)
 				out = append(out, sseEvent("response.output_text.delta", map[string]any{
 					"type": "response.output_text.delta", "item_id": st.itemID(0), "output_index": 0,
 					"content_index": 0, "delta": delta.Content,
@@ -958,10 +981,11 @@ func (st *streamState) finalEvents(finishReason string) [][]byte {
 		case "tool_calls", "function_call":
 			stop = "tool_use"
 		}
+		prompt, completion := st.usageCounts()
 		out = append(out, sseEvent("message_delta", map[string]any{
 			"type":  "message_delta",
 			"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
-			"usage": map[string]any{"input_tokens": st.promptTok, "output_tokens": st.compleTok},
+			"usage": map[string]any{"input_tokens": prompt, "output_tokens": completion},
 		}))
 		out = append(out, sseEvent("message_stop", map[string]any{"type": "message_stop"}))
 		return out
@@ -1006,9 +1030,12 @@ func (st *streamState) finalEvents(finishReason string) [][]byte {
 		"response": map[string]any{
 			"id": st.messageID, "object": "response", "status": status, "model": st.model,
 			"created_at": st.createdAt, "output": completedOutput,
-			"usage": map[string]any{
-				"input_tokens": st.promptTok, "output_tokens": st.compleTok, "total_tokens": st.totalTok,
-			},
+			"usage": func() map[string]any {
+				prompt, completion := st.usageCounts()
+				return map[string]any{
+					"input_tokens": prompt, "output_tokens": completion, "total_tokens": prompt + completion,
+				}
+			}(),
 		},
 	}))
 	return out

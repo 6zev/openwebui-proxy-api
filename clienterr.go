@@ -93,3 +93,47 @@ func sanitizeDetail(text string) string {
 func readUpstreamError(body io.Reader) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(body, 8<<10))
 }
+
+// ensureStreamUsage asks the upstream for token usage on a streaming chat call.
+//
+// OpenAI-compatible servers only report usage in a stream when the request sets
+// stream_options.include_usage. Without it a streaming client shows no token
+// count and no tokens-per-second, which is exactly what mobile agents (OpenMinis,
+// Kelivo) display. The flag is added to the proxy's outbound copy only, so the
+// caller's payload is untouched; a request that already sets it keeps its value.
+func ensureStreamUsage(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var request map[string]json.RawMessage
+	if json.Unmarshal(body, &request) != nil || request == nil {
+		return body
+	}
+	var stream bool
+	if raw, ok := request["stream"]; !ok || json.Unmarshal(raw, &stream) != nil || !stream {
+		return body
+	}
+	var options map[string]json.RawMessage
+	if raw, ok := request["stream_options"]; ok {
+		if json.Unmarshal(raw, &options) != nil {
+			options = nil
+		}
+	}
+	if options == nil {
+		options = map[string]json.RawMessage{}
+	}
+	if _, set := options["include_usage"]; set {
+		return body
+	}
+	options["include_usage"] = json.RawMessage("true")
+	encoded, err := json.Marshal(options)
+	if err != nil {
+		return body
+	}
+	request["stream_options"] = encoded
+	updated, err := json.Marshal(request)
+	if err != nil {
+		return body
+	}
+	return updated
+}

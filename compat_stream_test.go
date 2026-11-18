@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -46,5 +47,62 @@ func TestTranslateMissingStreaming(t *testing.T) {
 		if !strings.Contains(body.String(), "hel") {
 			t.Errorf("%s stream lost content:\n%s", tc.path, body.String())
 		}
+	}
+}
+
+// When the upstream reports no usage, a terminal event must not claim zero tokens:
+// clients show "0 tokens" as if nothing was generated. A character-based estimate
+// is reported instead, and real usage always wins.
+func TestTerminalUsageNeverClaimsZeroWithoutData(t *testing.T) {
+	state, opening := newStreamState(surfaceAnthropic, "m")
+	for _, event := range opening {
+		if strings.Contains(string(event), "message_start") {
+			continue
+		}
+	}
+	feed := func(payload string) {
+		if _, _, err := state.convertChatStream([]byte(payload)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	feed(`{"id":"c","choices":[{"delta":{"content":"a fairly long answer worth counting"}}]}`)
+	feed(`{"id":"c","choices":[{"delta":{},"finish_reason":"stop"}]}`)
+
+	events := state.finalEvents("stop")
+	var usage map[string]any
+	for _, event := range events {
+		// An SSE frame is "event: <name>\ndata: <json>\n\n"; parse the data line.
+		for _, line := range strings.Split(string(event), "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			var decoded struct {
+				Type  string         `json:"type"`
+				Usage map[string]any `json:"usage"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &decoded); err != nil {
+				continue
+			}
+			if decoded.Type == "message_delta" || decoded.Usage != nil {
+				usage = decoded.Usage
+			}
+		}
+	}
+	if usage == nil {
+		t.Fatal("no usage in message_delta")
+	}
+	if completion, _ := usage["output_tokens"].(float64); completion <= 0 {
+		t.Errorf("output_tokens = %v, want a positive estimate", usage["output_tokens"])
+	}
+
+	// Real numbers from the upstream take precedence over the estimate.
+	state2, _ := newStreamState(surfaceAnthropic, "m")
+	if _, _, err := state2.convertChatStream([]byte(`{"id":"c","choices":[{"delta":{"content":"x"}}],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}`)); err != nil {
+		t.Fatal(err)
+	}
+	prompt, completion := state2.usageCounts()
+	if prompt != 11 || completion != 3 {
+		t.Errorf("usage = %d/%d, want 11/3 from the upstream", prompt, completion)
 	}
 }
