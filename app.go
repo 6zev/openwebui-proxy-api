@@ -731,11 +731,12 @@ func serveWeb(w http.ResponseWriter, r *http.Request) bool {
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-store")
-	// The console ships no inline styles or event handlers, so style-src can stay
-	// strict. 'unsafe-inline' for styles is limited to the page itself and only
-	// exists so browser extensions (e.g. userscripts that restyle pages with
-	// element.style) cannot break the console; scripts stay locked to 'self'.
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
+	// The console ships one stylesheet and no inline style attributes, inline
+	// <style> blocks or style property writes, so style-src needs no
+	// 'unsafe-inline'. Nothing in the page creates style attributes at runtime
+	// (visibility is driven by the hidden attribute), which keeps the policy
+	// airtight without breaking the UI.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
 	// HSTS only when the request arrived over TLS; sending it on plain HTTP is
 	// ignored by browsers but would be a lie if a reverse proxy later serves HTTP.
 	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {

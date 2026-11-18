@@ -69,6 +69,14 @@ func TestConsoleSecurityHeaders(t *testing.T) {
 	if strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
 		t.Errorf("script-src allows inline scripts: %s", csp)
 	}
+	// The console has no inline style attributes, <style> blocks or style
+	// property writes, so style-src must not carry 'unsafe-inline' either.
+	if strings.Contains(csp, "unsafe-inline") {
+		t.Errorf("CSP still allows inline styles or scripts: %s", csp)
+	}
+	if !strings.Contains(csp, "style-src 'self'") {
+		t.Errorf("style-src not locked to self: %s", csp)
+	}
 	if got := resp.header.Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("nosniff = %q", got)
 	}
@@ -96,5 +104,29 @@ func TestRemoteHostTrustsForwardedForOnlyFromPrivatePeer(t *testing.T) {
 	}
 	if got := request("127.0.0.1:1234", "not-an-ip"); got != "127.0.0.1" {
 		t.Errorf("invalid forwarded-for should fall back: %s", got)
+	}
+}
+
+// The stylesheet must stay loadable under the stricter policy, and the page must
+// not reference any stylesheet outside /assets.
+func TestConsoleStylesheetAllowedByPolicy(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	cfg := proxyTestConfig(u, "alpha")
+	s := adminTestServer(t, cfg, adminTestKey)
+	page := adminTestRequest(t, s, "GET", "/", "", "", nil)
+	requireProxyStatus(t, page, http.StatusOK)
+	if !strings.Contains(page.body, `href="/assets/style.css"`) {
+		t.Errorf("page does not link the embedded stylesheet")
+	}
+	if strings.Contains(page.body, "<style") || strings.Contains(page.body, "style=") {
+		t.Errorf("page contains inline styles, which the CSP would block")
+	}
+	css := adminTestRequest(t, s, "GET", "/assets/style.css", "", "", nil)
+	requireProxyStatus(t, css, http.StatusOK)
+	if css.body == "" {
+		t.Error("stylesheet is empty")
+	}
+	if got := css.header.Get("Content-Type"); !strings.Contains(got, "text/css") {
+		t.Errorf("stylesheet content-type = %q", got)
 	}
 }
