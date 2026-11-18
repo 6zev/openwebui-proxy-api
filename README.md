@@ -391,6 +391,8 @@ print(client.chat.completions.create(
 5. Chỉ hỗ trợ Models và Chat Completions, chưa có Responses API, embeddings, audio, upload hoặc quản lý lịch sử chat. Proxy không mở thêm quyền model hay quota upstream.
 6. Lưu cấu hình: mỗi lần lưu ghi file tạm cùng thư mục rồi `rename` nguyên tử, quyền `0600`; nếu ghi thất bại, cấu hình đang chạy giữ nguyên và API trả lỗi. Request/stream đang chạy tiếp tục dùng cấu hình cũ tới khi kết thúc.
 7. WebUI/API quản trị không dùng cookie và từ chối request cross-origin; không có CORS mở. Đặt sau HTTPS khi truy cập từ ngoài.
+8. **Chống dò khoá admin**: sai 5 lần liên tiếp từ cùng một IP → khoá 1 phút, tăng dần (×2) tới 15 phút, trả `429` + `Retry-After`. Đúng khoá thì reset. `X-Forwarded-For` chỉ được tin khi peer là loopback/private (sau reverse proxy), nên client công khai không thể xoay header để né.
+9. Header bảo mật: `Content-Security-Policy` (script chỉ `'self'`, không inline; `object-src 'none'`, `base-uri 'none'`, `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, và `Strict-Transport-Security` **khi request đến bằng TLS** (trực tiếp hoặc `X-Forwarded-Proto: https`).
 
 Khởi động và `/healthz` không xác minh đăng nhập. Dùng **Kiểm tra** trong trang Accounts hoặc gọi `/v1/models` có ghim tài khoản để xác minh từng kết nối thật.
 

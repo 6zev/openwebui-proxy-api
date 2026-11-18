@@ -55,8 +55,21 @@ func adminTestServer(t *testing.T, cfg Config, key string) *httptest.Server {
 	}
 	s := httptest.NewServer(app)
 	t.Cleanup(s.Close)
+	apps.mu.Lock()
+	if apps.byServer == nil {
+		apps.byServer = map[string]*Application{}
+	}
+	apps.byServer[s.URL] = app
+	apps.mu.Unlock()
 	return s
 }
+
+// adminApps maps a test server URL to its Application so tests can reach
+// unexported state such as the brute-force guard.
+var apps = struct {
+	mu       sync.Mutex
+	byServer map[string]*Application
+}{}
 
 func adminTestRequest(t *testing.T, s *httptest.Server, method, path, body, key string, headers map[string]string) proxyTestResponse {
 	t.Helper()
@@ -157,6 +170,8 @@ func TestAdminAuthenticationFallbackAndOrigin(t *testing.T) {
 		t.Error("admin key under the 5-character minimum accepted")
 	}
 	s := adminTestServer(t, cfg, adminTestKey)
+	// Reset the brute-force guard between keys: this test walks 30 routes with the
+	// same client address, which is exactly the pattern the guard exists to stop.
 	for _, key := range []string{"", "wrong-key", testProxyKey} {
 		for _, route := range []struct{ method, path string }{
 			{"GET", "/api/admin/state"}, {"GET", "/api/admin/models"},
@@ -165,11 +180,17 @@ func TestAdminAuthenticationFallbackAndOrigin(t *testing.T) {
 			{"POST", "/api/admin/accounts"}, {"PUT", "/api/admin/accounts/alpha"},
 			{"DELETE", "/api/admin/accounts/alpha"}, {"POST", "/api/admin/accounts/alpha/test"},
 		} {
+			// The brute-force guard would trip on this loop, so clear it before each
+			// attempt: this test asserts per-route auth, not throttling.
+			resetAdminGuard(t, s)
 			requireProxyStatus(t, adminTestRequest(t, s, route.method, route.path, "{}", key, nil), 401)
 		}
 	}
+	resetAdminGuard(t, s)
 	requireProxyStatus(t, adminTestRequest(t, s, "GET", "/api/admin/state", "", adminTestKey, nil), 200)
+	resetAdminGuard(t, s)
 	requireProxyStatus(t, adminTestRequest(t, s, "GET", "/api/admin/state", "", "", map[string]string{"Cookie": "Authorization=Bearer " + adminTestKey + "; admin_key=" + adminTestKey}), 401)
+	resetAdminGuard(t, s)
 	for _, origin := range []string{"https://unrelated.example", "null"} {
 		resp := adminTestRequest(t, s, "GET", "/api/admin/state", "", adminTestKey, map[string]string{"Origin": origin})
 		requireProxyStatus(t, resp, 403)
@@ -672,5 +693,18 @@ func TestAdminStateExposesStoredName(t *testing.T) {
 	}
 	if decoded.Accounts[0]["name"] != "acc" {
 		t.Errorf("display name fallback broken: %v", decoded.Accounts[0]["name"])
+	}
+}
+
+// resetAdminGuard clears the admin throttle for a test server whose client
+// address is shared by every request in the test.
+func resetAdminGuard(t *testing.T, s *httptest.Server) {
+	t.Helper()
+	apps.mu.Lock()
+	defer apps.mu.Unlock()
+	if app, ok := apps.byServer[s.URL]; ok && app.guard != nil {
+		app.guard.mu.Lock()
+		app.guard.failures = map[string]*adminFailure{}
+		app.guard.mu.Unlock()
 	}
 }

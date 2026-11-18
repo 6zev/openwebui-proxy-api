@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +35,7 @@ type Application struct {
 	cfg      Config
 	proxy    *Proxy
 	adminKey [32]byte
+	guard    *adminGuard
 	revision uint64
 }
 
@@ -49,7 +52,7 @@ func NewApplication(cfg Config, adminKey string) (*Application, error) {
 	}
 	cfg.Websites = append([]WebsiteConfig{}, cfg.Websites...)
 	cfg.Accounts = append([]AccountConfig{}, cfg.Accounts...)
-	return &Application{cfg: cfg, proxy: proxy, adminKey: sha256.Sum256([]byte(adminKey)), revision: 1}, nil
+	return &Application{cfg: cfg, proxy: proxy, adminKey: sha256.Sum256([]byte(adminKey)), guard: newAdminGuard(), revision: 1}, nil
 }
 func (a *Application) snapshot() (*Proxy, Config, uint64) {
 	a.mu.RLock()
@@ -577,6 +580,31 @@ func (a *Application) testAccount(w http.ResponseWriter, r *http.Request, key st
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "account_id": id, "website_id": selected.config.WebsiteID, "models": response.Data})
 }
+
+// remoteHost is the client identity used for the admin throttle. Behind a
+// reverse proxy RemoteAddr is the proxy, so forwarded-for is honoured only when
+// the peer is a loopback/private address; otherwise one attacker could rotate the
+// header and defeat the limit.
+func remoteHost(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !(ip.IsLoopback() || ip.IsPrivate()) {
+		return host
+	}
+	forwarded := r.Header.Get("X-Forwarded-For")
+	if forwarded == "" {
+		return host
+	}
+	first := strings.TrimSpace(strings.Split(forwarded, ",")[0])
+	if net.ParseIP(first) != nil {
+		return first
+	}
+	return host
+}
+
 func adminOriginAllowed(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -585,6 +613,89 @@ func adminOriginAllowed(r *http.Request) bool {
 	u, err := url.Parse(origin)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host == r.Host && u.Path == "" && u.RawQuery == "" && u.Fragment == "" && u.User == nil
 }
+
+// adminGuard throttles admin key guessing. The minimum key length is small
+// (minAPIKeyLength), so a deployment with a short key is realistic; a stalled
+// attacker should not get unlimited attempts. Failures are counted per remote
+// host and lock the host out for a window that doubles up to a ceiling.
+type adminGuard struct {
+	mu       sync.Mutex
+	failures map[string]*adminFailure
+}
+
+type adminFailure struct {
+	count      int
+	blockedTil time.Time
+}
+
+const (
+	adminBurstLimit   = 5
+	adminLockWindow   = time.Minute
+	adminMaxLock      = 15 * time.Minute
+	adminGuardSweepAt = 1024
+)
+
+func newAdminGuard() *adminGuard {
+	return &adminGuard{failures: make(map[string]*adminFailure)}
+}
+
+// blocked reports whether this host must wait, and for how long.
+func (g *adminGuard) blocked(host string) (bool, time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	entry, ok := g.failures[host]
+	if !ok {
+		return false, 0
+	}
+	if wait := time.Until(entry.blockedTil); wait > 0 {
+		return true, wait
+	}
+	return false, 0
+}
+
+// record registers a failed attempt and returns the lockout applied, if any.
+func (g *adminGuard) record(host string) time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.failures == nil {
+		g.failures = make(map[string]*adminFailure)
+	}
+	if len(g.failures) > adminGuardSweepAt {
+		// Drop entries whose lockout has expired, so the map cannot grow forever.
+		now := time.Now()
+		for key, entry := range g.failures {
+			if now.After(entry.blockedTil) && entry.count == 0 {
+				delete(g.failures, key)
+			}
+		}
+	}
+	entry, ok := g.failures[host]
+	if !ok {
+		entry = &adminFailure{}
+		g.failures[host] = entry
+	}
+	entry.count++
+	if entry.count < adminBurstLimit {
+		return 0
+	}
+	lock := adminLockWindow
+	for i := adminBurstLimit; i < entry.count && lock < adminMaxLock; i++ {
+		lock *= 2
+	}
+	if lock > adminMaxLock {
+		lock = adminMaxLock
+	}
+	entry.blockedTil = time.Now().Add(lock)
+	return lock
+}
+
+// reset clears the counter after a successful authentication.
+func (g *adminGuard) reset(host string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.failures, host)
+}
+
 func (a *Application) authorized(r *http.Request) bool {
 	parts := strings.Fields(r.Header.Get("Authorization"))
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
@@ -624,7 +735,12 @@ func serveWeb(w http.ResponseWriter, r *http.Request) bool {
 	// strict. 'unsafe-inline' for styles is limited to the page itself and only
 	// exists so browser extensions (e.g. userscripts that restyle pages with
 	// element.style) cannot break the console; scripts stay locked to 'self'.
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
+	// HSTS only when the request arrived over TLS; sending it on plain HTTP is
+	// ignored by browsers but would be a lie if a reverse proxy later serves HTTP.
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+	}
 	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
 	return true
 }
@@ -646,10 +762,21 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.ServeHTTP(w, r)
 		return
 	}
+	host := remoteHost(r)
+	if blocked, wait := a.guard.blocked(host); blocked {
+		seconds := int((wait + time.Second - 1) / time.Second)
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		writeError(w, &apiError{429, "Too many failed admin attempts; retry later", seconds})
+		return
+	}
 	if !a.authorized(r) {
+		if lock := a.guard.record(host); lock > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(lock/time.Second)))
+		}
 		writeError(w, &apiError{401, "Invalid admin API key", 0})
 		return
 	}
+	a.guard.reset(host)
 	if !adminOriginAllowed(r) {
 		writeError(w, &apiError{403, "Cross-origin admin requests are not allowed", 0})
 		return
