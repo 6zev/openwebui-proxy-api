@@ -1351,6 +1351,20 @@ func chatPromptFromBody(body []byte) (string, string, bool, error) {
 	return model, prompt, stream, err
 }
 
+// isUnsetChoice reports whether a panel value means "leave it alone".
+//
+// Only the literals LibreChat writes for an untouched control count: "unset" for the
+// reasoning block and the empty string for its enums (ReasoningSummary.none = ”).
+// "auto" is NOT one of them — it is a real choice that means "let the provider pick",
+// and dropping it would silently override the operator.
+func isUnsetChoice(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "unset":
+		return true
+	}
+	return false
+}
+
 // chatPromptFromBodyWithParams also returns the sampling parameters the caller set.
 // LibreChat reads them from agent model_parameters, so carrying them across is the
 // difference between honouring temperature/max_tokens and silently ignoring them.
@@ -1366,7 +1380,23 @@ func chatPromptFromBodyWithParams(body []byte) (string, string, bool, map[string
 		PresencePenalty     *float64        `json:"presence_penalty"`
 		Stop                json.RawMessage `json:"stop"`
 		Seed                *int            `json:"seed"`
-		Messages            []struct {
+		// Parameters LibreChat exposes in its Model Parameters panel that also have a
+		// meaning for an OpenAI-shaped upstream.
+		ReasoningEffort  string          `json:"reasoning_effort"`
+		ReasoningSummary string          `json:"reasoning_summary"`
+		ReasoningMode    string          `json:"reasoning_mode"`
+		ReasoningContext string          `json:"reasoning_context"`
+		Verbosity        string          `json:"verbosity"`
+		UseResponsesAPI  *bool           `json:"use_responses_api"`
+		Effort           string          `json:"effort"`
+		WebSearch        *bool           `json:"web_search"`
+		DisableStreaming *bool           `json:"disable_streaming"`
+		TopK             *int            `json:"top_k"`
+		MaxContextTokens *int            `json:"max_context_tokens"`
+		PromptPrefix     string          `json:"prompt_prefix"`
+		User             string          `json:"user"`
+		Metadata         json.RawMessage `json:"metadata"`
+		Messages         []struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
@@ -1401,6 +1431,61 @@ func chatPromptFromBodyWithParams(body []byte) (string, string, bool, map[string
 	}
 	if len(request.Stop) > 0 && string(request.Stop) != "null" {
 		params["stop"] = request.Stop
+	}
+	// LibreChat stores several of these under a camelCase name of its own; the
+	// mapping is deliberate, so a panel value reaches the provider with the name it
+	// understands.
+	if request.ReasoningEffort != "" && !isUnsetChoice(request.ReasoningEffort) {
+		params["reasoning_effort"] = request.ReasoningEffort
+	}
+	if request.TopK != nil {
+		params["top_k"] = *request.TopK
+	}
+	// The reasoning family: LibreChat forwards these verbatim into the provider's
+	// reasoning object, so they are passed through under their own names.
+	for key, value := range map[string]string{
+		"reasoning_summary": request.ReasoningSummary,
+		"reasoning_mode":    request.ReasoningMode,
+		"reasoning_context": request.ReasoningContext,
+		"verbosity":         request.Verbosity,
+		"effort":            request.Effort,
+	} {
+		if value != "" && !isUnsetChoice(value) {
+			params[key] = value
+		}
+	}
+	// Whether the upstream speaks the Responses API is a provider capability, not a
+	// per-request knob the proxy can honour: it decides the wire format before the
+	// request leaves. It is reported rather than silently dropped.
+	if request.UseResponsesAPI != nil && *request.UseResponsesAPI {
+		params["useResponsesApi"] = true
+	}
+	// Web search is a hosted tool: the provider runs it, so the flag travels with the
+	// request. LibreChat's own panel calls it web_search.
+	if request.WebSearch != nil {
+		params["web_search"] = *request.WebSearch
+	}
+	if request.DisableStreaming != nil {
+		params["disableStreaming"] = *request.DisableStreaming
+	}
+	if request.MaxContextTokens != nil {
+		// Not sent to the provider: LibreChat uses it to decide how much history to
+		// include, and the proxy has already flattened the transcript it was given.
+		params["maxContextTokens"] = *request.MaxContextTokens
+	}
+	if request.PromptPrefix != "" {
+		// A prefix is a system instruction. LibreChat prepends it; the proxy carries it
+		// in the same slot so the setting is not silently dropped.
+		params["promptPrefix"] = request.PromptPrefix
+	}
+	if request.User != "" {
+		params["user"] = request.User
+	}
+	if len(request.Metadata) > 0 && string(request.Metadata) != "null" {
+		var metadata map[string]json.RawMessage
+		if json.Unmarshal(request.Metadata, &metadata) == nil {
+			params["metadata"] = metadata
+		}
 	}
 	var transcript strings.Builder
 	last := ""

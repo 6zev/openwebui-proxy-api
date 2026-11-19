@@ -317,7 +317,22 @@ Shape body (lấy từ DevTools của UI thật):
 
 ### Model Parameters (LibreChat)
 
-`temperature`, `top_p`, `max_tokens`/`max_completion_tokens`, `frequency_penalty`, `presence_penalty`, `seed`, `stop` của client được chuyển vào `endpointOption.model_parameters` của body LibreChat — đó là kênh duy nhất mà agent build đọc rồi đẩy xuống SDK provider. Không set thì **không gửi** block, để upstream giữ default của nó.
+Toàn bộ Model Parameters của LibreChat được chuyển vào `endpointOption.model_parameters`:
+
+| Panel | Field gửi đi |
+|---|---|
+| Nhiệt độ / Top P / Top K | `temperature`, `top_p`, `top_k` |
+| Max tokens / Max Context Tokens | `max_tokens`, `max_completion_tokens`→`max_output_tokens`, `maxContextTokens` |
+| Frequency / Presence penalty | cùng tên |
+| Seed / Stop Sequences | `seed`, `stop` |
+| Reasoning Effort / Summary / Mode / Context | cùng tên |
+| Verbosity / Effort | cùng tên |
+| Tiền tố (prompt prefix) | `promptPrefix` |
+| Web Search / Disable Streaming | `web_search`, `disableStreaming` |
+| Use Responses API | `useResponsesApi` |
+| Tên tùy chỉnh / user / metadata | `modelDisplayLabel`, `user`, `metadata` |
+
+`unset` (và chuỗi rỗng) = "chưa đặt" → **không gửi**, để upstream giữ default. `auto` là lựa chọn thật ("để provider tự quyết") nên **có** gửi. — đó là kênh duy nhất mà agent build đọc rồi đẩy xuống SDK provider. Không set thì **không gửi** block, để upstream giữ default của nó.
 
 ### Metadata model của LibreChat
 
