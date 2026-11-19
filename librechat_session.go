@@ -65,21 +65,56 @@ func newLibreChatID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
 }
 
-// libreChatEndpointName is the provider family a model belongs to. The web UI sends
-// the endpoint the user picked in the model picker; the proxy derives it from the
-// model id so no extra configuration is needed.
-func libreChatEndpointName(model string) string {
+// libreChatEndpointName is the endpoint the model picker would have selected.
+//
+// The authoritative source is the model list: LibreChat's /api/models groups ids
+// under provider names, and that group IS the endpoint. Guessing from the id alone
+// fails on deployments with providers the guess does not know (Deepseek,
+// Databricks, bedrock, assistants...), which answer endpoint_models_not_loaded.
+// The provider captured with the model list is used first; the id heuristics stay
+// only as a fallback for a model that never appeared in the list.
+func libreChatEndpointName(model string, knownProviders map[string]string) string {
+	if provider, ok := knownProviders[model]; ok && provider != "" {
+		return provider
+	}
 	switch {
 	case strings.Contains(model, "deepseek"):
 		return "Deepseek"
 	case strings.HasPrefix(model, "claude"), strings.Contains(model, "anthropic"):
-		return "Anthropic"
+		return "anthropic"
 	case strings.Contains(model, "gemini"):
-		return "Google"
+		return "google"
 	case strings.Contains(model, "gpt"), strings.Contains(model, "o1"), strings.Contains(model, "o3"):
 		return "openAI"
 	}
 	return "openAI"
+}
+
+// libreChatProviderIndex maps model id -> provider for the account about to serve.
+//
+// The cache may legitimately be cold or disabled (MODEL_CACHE_SECONDS=0), and a
+// widget-only deployment would then guess the endpoint and fail with
+// endpoint_models_not_loaded. So a cold cache triggers a real listing here: the
+// answer is small, and it is the difference between working and not working.
+func (p *Proxy) libreChatProviderIndex(ctx context.Context, a *account) map[string]string {
+	index := map[string]string{}
+	models := []cachedModel(nil)
+	if p.modelCache != nil {
+		if cached, _, ok := p.modelCache.peek(accountKey(a.config.WebsiteID, a.config.ID)); ok {
+			models = cached
+		}
+	}
+	if models == nil {
+		if fetched, err := p.fetchModelList(ctx, a); err == nil {
+			models = fetched
+		}
+	}
+	for _, cached := range models {
+		if cached.ID != "" && cached.OwnedBy != "" {
+			index[cached.ID] = cached.OwnedBy
+		}
+	}
+	return index
 }
 
 // libreChatSession is the per-account login state.
@@ -329,7 +364,7 @@ func (p *Proxy) libreChatStartTurn(ctx context.Context, a *account, token, promp
 	// endpointOption. The endpoint name comes from the caller ("Deepseek",
 	// "openAI", ...); "custom" tells LibreChat the model is a provider slug.
 	now := time.Now().UTC().Format("2006-01-02T15:04:05")
-	endpointName := libreChatEndpointName(model)
+	endpointName := libreChatEndpointName(model, p.libreChatProviderIndex(ctx, a))
 	payload := map[string]any{
 		"text":              prompt,
 		"sender":            "User",

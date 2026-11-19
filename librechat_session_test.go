@@ -213,12 +213,36 @@ func TestLibreChatEndpointName(t *testing.T) {
 	cases := map[string]string{
 		"deepseek-chat":         "Deepseek",
 		"gpt-6.1-sol":           "openAI",
-		"claude-opus-5":         "Anthropic",
-		"gemini-3.8-flash":      "Google",
+		"claude-opus-5":         "anthropic",
+		"gemini-3.8-flash":      "google",
 		"something-unknown-xyz": "openAI",
 	}
 	for model, want := range cases {
-		if got := libreChatEndpointName(model); got != want {
+		if got := libreChatEndpointName(model, nil); got != want {
+			t.Errorf("libreChatEndpointName(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+// The model list is authoritative for the endpoint name: a provider the id
+// heuristics do not know (Databricks, bedrock, assistants) must still route to its
+// real endpoint instead of failing with endpoint_models_not_loaded.
+func TestLibreChatEndpointFromModelList(t *testing.T) {
+	known := map[string]string{
+		"databricks-gpt-5-4-nano": "Databricks",
+		"anthropic.claude-opus-4": "bedrock",
+		"gpt-5.4":                 "assistants",
+		"deepseek-chat":           "Deepseek",
+	}
+	cases := map[string]string{
+		"databricks-gpt-5-4-nano": "Databricks",
+		"anthropic.claude-opus-4": "bedrock",
+		"gpt-5.4":                 "assistants",
+		"deepseek-chat":           "Deepseek",
+		"never-listed-model":      "openAI", // fallback only
+	}
+	for model, want := range cases {
+		if got := libreChatEndpointName(model, known); got != want {
 			t.Errorf("libreChatEndpointName(%q) = %q, want %q", model, got, want)
 		}
 	}
