@@ -325,18 +325,18 @@ X-Account-ID: &lt;account_id&gt;  <span class="code-comment"># tuỳ chọn</spa
             <label for="entity-backend">Backend</label>
             <select id="entity-backend" name="backend">
               <option value="openwebui">Open WebUI — email + mật khẩu</option>
-              <option value="librechat">LibreChat Agents — API key</option>
+              <option value="librechat">LibreChat — API key hoặc email + mật khẩu</option>
             </select>
           </div>
           <div class="field" data-backend-field="librechat">
-            <label for="entity-api-key">Agent API key <span class="req">*</span></label>
-            <input id="entity-api-key" name="api_key" type="password" autocomplete="new-password" placeholder="Để trống khi sửa để giữ khoá hiện tại">
+            <label for="entity-api-key">Agent API key</label>
+            <input id="entity-api-key" name="api_key" type="password" autocomplete="new-password" placeholder="Chỉ dùng để gọi AGENT qua /api/agents/v1">
           </div>
-          <div class="field" data-backend-field="openwebui">
-            <label for="entity-email">Email <span class="req">*</span></label>
+          <div class="field">
+            <label for="entity-email">Email</label>
             <input id="entity-email" name="email" type="email" autocomplete="off">
           </div>
-          <div class="field" data-backend-field="openwebui">
+          <div class="field">
             <label for="entity-password">Mật khẩu</label>
             <input id="entity-password" name="password" type="password" autocomplete="new-password">
             <p id="password-help" class="hint">Để trống khi sửa để giữ mật khẩu hiện tại.</p>

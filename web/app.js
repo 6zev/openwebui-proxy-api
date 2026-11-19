@@ -420,12 +420,10 @@
     // Drive visibility through one class so CSS owns layout; the per-field
     // `hidden` attribute alone is easy to override and left gaps in the form.
     $('account-fields').classList.toggle('is-librechat', libre);
-    // LibreChat has no email/password pair at all, so hide those inputs instead
-    // of leaving dead optional fields in the form. A hidden *and* required input
-    // makes the browser refuse to submit ("not focusable"), so `required` must
-    // always be cleared together with `hidden`.
-    // Hide the whole .field wrapper of each backend-only input; hiding the
-    // input alone still leaves the label and its spacing in the form.
+    // A hidden *and* required input makes the browser refuse to submit ("not
+    // focusable"), so `required` is cleared together with `hidden`, and the whole
+    // .field wrapper is hidden — hiding the input alone leaves the label and its
+    // spacing behind.
     const hideField = (id, hide) => {
       const input = $(id);
       const field = input.closest('.field');
@@ -435,14 +433,26 @@
       if (hide) input.value = '';
       return !hide;
     };
-    const showEmail = hideField('entity-email', libre || !isAccount);
-    $('entity-email').required = showEmail;
-    const showPassword = hideField('entity-password', libre || !isAccount);
-    $('entity-password').required = showPassword && !editor?.id;
+    // LibreChat accepts TWO credential shapes and they are not interchangeable:
+    // an Agent API key (drives /api/agents/v1) or email+password (drives the web
+    // session, which is what reaches models). So on LibreChat both groups are
+    // visible and neither is required on its own — the save handler refuses only
+    // when neither is filled.
+    const showEmail = hideField('entity-email', !isAccount);
+    const showPassword = hideField('entity-password', !isAccount);
     const showAPIKey = hideField('entity-api-key', !libre || !isAccount);
-    $('entity-api-key').required = showAPIKey && !(editor?.id && entityHasKey(editor.id));
+    const editing = Boolean(editor?.id);
+    const hasStored = editing && entityHasCredentials(editor.id);
+    $('entity-email').required = showEmail && !libre;
+    $('entity-password').required = showPassword && !libre && !editing;
+    $('entity-api-key').required = false;
     const help = $('password-help');
-    if (help) help.hidden = libre || !isAccount;
+    if (help) {
+      help.hidden = !isAccount;
+      help.textContent = libre
+        ? (hasStored ? 'Đã lưu thông tin đăng nhập. Để trống để giữ nguyên.' : 'Điền MỘT trong hai: Agent API key, hoặc Email + Mật khẩu (dùng session web để gọi mọi model).')
+        : 'Mật khẩu chỉ lưu một chiều; để trống khi sửa để giữ mật khẩu hiện tại.';
+    }
   }
 
   function backendKind() {
@@ -452,6 +462,13 @@
   function entityHasKey(keyOrID) {
     const account = findAccount(keyOrID);
     return Boolean(account && account.has_api_key);
+  }
+
+  // entityHasCredentials reports whether the account already stores either shape, so
+  // an untouched edit form does not demand them again.
+  function entityHasCredentials(keyOrID) {
+    const account = findAccount(keyOrID);
+    return Boolean(account && (account.has_api_key || account.has_password));
   }
 
   async function saveEntity(event) {
@@ -480,9 +497,24 @@
       if (!state.websites.some((site) => site.id === body.website_id)) { showError('editor-error', 'Chọn một website đã đăng ký.'); return; }
       body.backend = backendKind();
       if (body.backend === 'librechat') {
+        // LibreChat takes exactly one shape: an Agent API key, or email+password for
+        // the web session. Sending both is refused by the backend on purpose.
         const apiKey = $('entity-api-key').value.trim();
+        const email = $('entity-email').value.trim();
+        const password = $('entity-password').value;
+        if (apiKey && (email || password)) {
+          showError('editor-error', 'Chọn MỘT: Agent API key, hoặc Email + Mật khẩu. Hai kiểu này đi tới hai API khác nhau của LibreChat.');
+          return;
+        }
         if (apiKey) body.api_key = apiKey;
-        if (!apiKey && !(context.id && entityHasKey(context.id))) { showError('editor-error', 'Nhập Agent API key cho tài khoản LibreChat.'); return; }
+        else if (email) {
+          body.email = email;
+          if (password) body.password = password;
+          else if (!context.id) { showError('editor-error', 'Nhập mật khẩu cho tài khoản LibreChat.'); return; }
+        } else if (!(context.id && entityHasCredentials(context.id))) {
+          showError('editor-error', 'Nhập Agent API key, hoặc Email + Mật khẩu cho tài khoản LibreChat.');
+          return;
+        }
       } else {
         // Open WebUI backend: email is required, password optional on edit.
         body.email = $('entity-email').value.trim();

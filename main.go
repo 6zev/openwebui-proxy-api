@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-var Version = "v0.37.0"
+var Version = "v0.37.1"
 
 // loadDotEnv intentionally supports single-line KEY=value, quoted strings and
 // comment lines only. No shell evaluation or variable interpolation is performed.

@@ -424,7 +424,19 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 	err := a.mutate(func(doc *configDocument) error {
 		// Account IDs only need to be unique within one website, so the lookup
 		// key is the composite "<website-id>/<account-id>".
+		//
+		// On POST the address is the bare id in the body and the website comes from
+		// the draft, so the composite has to be assembled here. Splitting the bare id
+		// alone left websiteID empty, which made every create with an id that also
+		// exists elsewhere look like an ambiguous edit and fail with a conflict.
 		websiteID, accountID := splitAccountKey(id)
+		if r.Method == http.MethodPost {
+			accountID = id
+			websiteID = ""
+			if draft.WebsiteID != nil {
+				websiteID = strings.TrimSpace(*draft.WebsiteID)
+			}
+		}
 		index := -1
 		matches := 0
 		for i, c := range doc.Accounts {
@@ -435,9 +447,10 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 				matches++
 			}
 		}
-		// A bare ID that exists in several websites would silently edit or
-		// delete the wrong account, so it is refused instead of guessed.
-		if websiteID == "" && matches > 1 {
+		// A bare ID that exists in several websites would silently edit or delete the
+		// wrong account, so it is refused instead of guessed. Creating is exempt: the
+		// draft names its target website, checked below.
+		if r.Method != http.MethodPost && websiteID == "" && matches > 1 {
 			return &apiError{status: 409, message: "Account ID exists in more than one website; use <website-id>/<account-id>"}
 		}
 		if r.Method == http.MethodPost {
