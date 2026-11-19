@@ -145,7 +145,7 @@ func TestRequireIdempotencyKey(t *testing.T) {
 // does not depend on how buildProxy validates backends.
 func libreChatTestAccount(t *testing.T, baseURL, id, key string) *Proxy {
 	t.Helper()
-	client, err := newBackendClient(AccountConfig{}, time.Second)
+	client, err := newBackendClient(AccountConfig{}, time.Second, false)
 	if err != nil {
 		t.Fatalf("newBackendClient: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestLibreChatAuthHeaderEndToEnd(t *testing.T) {
 
 	cfg := Config{APIKey: testProxyKey, Timeout: time.Second, Cooldown: time.Second,
 		Accounts: []AccountConfig{{ID: "lc", Backend: BackendLibreChat, APIKey: "k12345678", BaseURL: server.URL}}}
-	client, err := newBackendClient(cfg.Accounts[0], cfg.Timeout)
+	client, err := newBackendClient(cfg.Accounts[0], cfg.Timeout, false)
 	if err != nil {
 		t.Fatalf("newBackendClient: %v", err)
 	}

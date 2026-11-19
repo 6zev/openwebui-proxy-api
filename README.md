@@ -294,7 +294,7 @@ LibreChat không có một "API model" thẳng như Open WebUI. Có hai đườn
 | Credential | Đi tới | Dùng được cho |
 |---|---|---|
 | `api_key` (Agent API key) | `/api/agents/v1/*` | **Agent** đã định nghĩa sẵn. Không gọi thẳng model. |
-| `email` + `password` | Session web: `POST /api/auth/login` → JWT → `POST /api/agents/chat/completions` → `GET /api/agents/chat/stream/<streamId>` | **Model** bất kỳ trên instance, như giao diện web |
+| `email` + `password` | Session web: `POST /api/auth/login` → JWT → `POST /api/agents/chat/<endpoint>` → `GET /api/agents/chat/stream/<streamId>` | **Model** bất kỳ trên instance, như giao diện web |
 
 Hai kiểu **không thay thế nhau**: Agents API từ chối JWT session (`invalid_api_key`), còn route chat UI không nhận agent key. Không được khai cả hai trên một acc (config sẽ bị từ chối).
 
@@ -303,6 +303,19 @@ Session account cần biết:
 - Mọi request đều gửi **User-Agent giống browser** — LibreChat ghi violation nếu thiếu và đủ điểm sẽ **ban IP** (`BAN_DURATION`, mặc định 2 giờ).
 - Login bị từ chối (403 ban / sai mật khẩu) thì acc bị **tạm dừng 30 phút và KHÔNG retry** — mỗi lần thử là thêm một violation.
 - Lịch sử nhiều lượt được **làm phẳng thành transcript** gửi trong một lượt; proxy không giữ trạng thái hội thoại giữa các lần gọi.
+- Route chat là `/api/agents/chat/<endpoint>` với `endpointType: "custom"` và `endpoint` suy ra từ model (`Deepseek`, `openAI`, `Anthropic`, `Google`) — **không** dùng `agents`/`agent_id`.
+
+Shape body (lấy từ DevTools của UI thật):
+
+```json
+{"text":"…","sender":"User","clientTimestamp":"…","isCreatedByUser":true,
+ "parentMessageId":"00000000-0000-0000-0000-000000000000","messageId":"<uuid>",
+ "error":false,"endpoint":"Deepseek","endpointType":"custom","model":"deepseek-chat",
+ "key":"never","modelDisplayLabel":"Deepseek","isTemporary":false,"isRegenerate":false,
+ "isContinued":false,"timezone":"UTC","clientRequestId":"<uuid>"}
+```
+
+Stream: SSE event name luôn là `message`; ngữ nghĩa nằm trong field `event` của payload — `on_message_delta` (có `delta.content[].text`), `on_token_usage` (token), và frame cuối `{"final":true,...}`. Frame đầu tiên là echo tin nhắn của chính người dùng nên **không** được tính vào câu trả lời. Bật `LIBRECHAT_STREAM_DEBUG=1` để dump payload thô khi upstream đổi format.
 - `LIBRECHAT_ORIGIN` chỉ cần đặt khi instance bật kiểm `Origin` chặt (gửi kèm `Origin`/`Referer`).
 
 Lấy agent key: LibreChat → **Settings → Data & Privacy → API keys → Agent API Keys** (role cần quyền **Remote Agents**). Health probe của acc dùng agent key gọi `/api/agents/v1/agents`; **401** ở đó nghĩa là key sai/bị thu hồi hoặc thiếu quyền.

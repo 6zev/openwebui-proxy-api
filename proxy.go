@@ -29,6 +29,10 @@ type WebsiteConfig struct {
 	// accounts. Slow hosts (a model list that takes 20s) need a budget of their
 	// own; zero or absent means inherit Config.Timeout.
 	TimeoutMS int `json:"timeout_ms,omitempty"`
+	// InsecureTLS skips certificate verification for this website. A self-hosted
+	// instance reached by bare IP cannot present a valid certificate (no IP SAN),
+	// so this is the supported escape hatch — per website, never global.
+	InsecureTLS bool `json:"insecure_tls,omitempty"`
 }
 type AccountConfig struct {
 	ID        string `json:"id"`
@@ -276,7 +280,7 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 		if a.WebsiteID != "" {
 			timeout = timeoutFor(c, p.sites[a.WebsiteID].TimeoutMS)
 		}
-		client, err := newOutboundClient(proxyURL, timeout)
+		client, err := newOutboundClient(proxyURL, timeout, p.sites[a.WebsiteID].InsecureTLS)
 		if err != nil {
 			return nil, fmt.Errorf("account %s: invalid outbound proxy configuration", a.ID)
 		}
@@ -553,6 +557,13 @@ func (p *Proxy) login(ctx context.Context, a *account) (string, error) {
 	data, _ := json.Marshal(map[string]string{"email": a.config.Email, "password": a.config.Password})
 	req, _ := http.NewRequestWithContext(loginCtx, http.MethodPost, a.config.BaseURL+"/api/v1/auths/signin", bytes.NewReader(data))
 	req.Header.Set("Content-Type", "application/json")
+	// Present the request as coming from the instance's own web UI: Open WebUI
+	// deployments behind a strict proxy (or with CSRF middleware) reject a signin
+	// with no Origin. The base URL is the origin a browser would use.
+	if origin := p.originFor(req.URL); origin != "" {
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Referer", origin+"/")
+	}
 	resp, err := a.client.Do(req)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -972,18 +983,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		accountPath := path
 		extra := http.Header{}
 		if a.config.Backend == BackendLibreChat {
-			public := "/v1/chat/completions"
-			if models {
-				public = "/v1/models"
-			}
-			if chat {
-				public = "/v1/chat/completions"
-			}
-			if mapped, ok := libreChatUpstreamPath(public); ok {
-				accountPath = mapped
-			} else {
-				err = &apiError{status: 404, message: "Endpoint not found"}
-				break
+			sessionOnly := a.config.APIKey == ""
+			switch {
+			case models && sessionOnly:
+				// A session JWT is refused by the Agents API, but the web UI's own
+				// /api/models accepts it — and that map is what the UI displays.
+				accountPath = libreChatSessionModelPath()
+			case models || chat:
+				public := "/v1/chat/completions"
+				if models {
+					public = "/v1/models"
+				}
+				if mapped, ok := libreChatUpstreamPath(public); ok {
+					accountPath = mapped
+				} else {
+					err = &apiError{status: 404, message: "Endpoint not found"}
+					break
+				}
 			}
 		}
 		w.Header().Set("X-Account-ID", a.config.ID)
@@ -1031,30 +1047,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, &apiError{status: 502, message: "Model list exceeds 8 MiB"})
 			return
 		}
-		var items []struct {
-			ID      string `json:"id"`
-			Created int64  `json:"created"`
-			OwnedBy string `json:"owned_by"`
-		}
-		var envelope struct {
-			Data json.RawMessage `json:"data"`
-		}
-		if json.Unmarshal(raw, &envelope) == nil && envelope.Data != nil {
-			raw = envelope.Data
-		}
-		if json.Unmarshal(raw, &items) != nil || items == nil {
-			writeError(w, &apiError{status: 502, message: "Unexpected model-list response"})
+		cached, parseErr := parseAnyModelList(raw)
+		if parseErr != nil {
+			writeError(w, parseErr)
 			return
-		}
-		cached := make([]cachedModel, 0, len(items))
-		for _, m := range items {
-			if m.ID == "" {
-				continue
-			}
-			if m.OwnedBy == "" {
-				m.OwnedBy = "open-webui"
-			}
-			cached = append(cached, cachedModel{ID: m.ID, Created: m.Created, OwnedBy: m.OwnedBy})
 		}
 		if p.modelCache != nil {
 			// Record what this fetch cost, so an expensive upstream is not
@@ -1336,14 +1332,26 @@ func messageText(raw json.RawMessage) string {
 // writeLibreChatTurn renders a completed turn in the shape the caller asked for.
 func writeLibreChatTurn(w http.ResponseWriter, model string, turn *libreChatTurn, stream bool) {
 	created := time.Now().Unix()
+	usage := map[string]any{}
+	if turn.PromptTokens > 0 || turn.CompletionTokens > 0 {
+		usage = map[string]any{
+			"prompt_tokens":     turn.PromptTokens,
+			"completion_tokens": turn.CompletionTokens,
+			"total_tokens":      turn.PromptTokens + turn.CompletionTokens,
+		}
+	}
 	if !stream {
-		writeJSON(w, 200, map[string]any{
+		body := map[string]any{
 			"id": "chatcmpl-lc", "object": "chat.completion", "created": created, "model": model,
 			"choices": []map[string]any{{
 				"index": 0, "finish_reason": "stop",
 				"message": map[string]any{"role": "assistant", "content": turn.Text},
 			}},
-		})
+		}
+		if len(usage) > 0 {
+			body["usage"] = usage
+		}
+		writeJSON(w, 200, body)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -1363,6 +1371,9 @@ func writeLibreChatTurn(w http.ResponseWriter, model string, turn *libreChatTurn
 	done := map[string]any{
 		"id": "chatcmpl-lc", "object": "chat.completion.chunk", "created": created, "model": model,
 		"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+	}
+	if len(usage) > 0 {
+		done["usage"] = usage
 	}
 	if encoded, err := json.Marshal(done); err == nil {
 		fmt.Fprintf(w, "data: %s\n\n", encoded)

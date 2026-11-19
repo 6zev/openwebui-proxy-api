@@ -98,8 +98,8 @@ func validateBackendAccount(a AccountConfig) error {
 // are resolved before the account reaches this point, so the raw proxy string
 // is passed straight through; the literal "direct" keeps its existing meaning
 // of "ignore environment proxies".
-func newBackendClient(a AccountConfig, timeout time.Duration) (*http.Client, error) {
-	return newOutboundClient(a.ProxyURL, timeout)
+func newBackendClient(a AccountConfig, timeout time.Duration, insecure bool) (*http.Client, error) {
+	return newOutboundClient(a.ProxyURL, timeout, insecure)
 }
 
 // resolveAuth returns the Authorization header value for one upstream request.
@@ -183,6 +183,11 @@ func libreChatRouteFor(path string) (libreChatRoute, bool) {
 	}
 	return libreChatRoute{}, false
 }
+
+// libreChatSessionModelPath is the models route a SESSION account can read. The
+// Agents API refuses a session JWT, but the web UI's /api/models accepts it and
+// answers the provider map the UI itself displays.
+func libreChatSessionModelPath() string { return "/api/models" }
 
 func libreChatUpstreamPath(path string) (string, bool) {
 	for _, route := range libreChatRoutes {

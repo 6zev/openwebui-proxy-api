@@ -44,7 +44,7 @@ func newLibreChatFixture(t *testing.T, finalText string) *libreChatFixture {
 			}
 			http.SetCookie(w, &http.Cookie{Name: "refreshToken", Value: "r1", Path: "/"})
 			_, _ = io.WriteString(w, `{"token":"jwt-1","user":{"id":"u1"}}`)
-		case r.URL.Path == "/api/agents/chat/completions":
+		case strings.HasPrefix(r.URL.Path, "/api/agents/chat/") && !strings.Contains(r.URL.Path, "/stream/"):
 			f.turns.Add(1)
 			raw, _ := io.ReadAll(r.Body)
 			f.lastStart.Store(string(raw))
@@ -57,8 +57,12 @@ func newLibreChatFixture(t *testing.T, finalText string) *libreChatFixture {
 		case strings.HasPrefix(r.URL.Path, "/api/agents/chat/stream/"):
 			f.streams.Add(1)
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(w, `event: message`+"\n"+`data: {"text":"Hel"}`+"\n\n")
-			_, _ = io.WriteString(w, `event: message`+"\n"+`data: {"text":"lo"}`+"\n\n")
+			// Real shape: the SSE event name is always "message" and the meaning sits
+			// in the payload's own "event" field.
+			_, _ = io.WriteString(w, `event: message`+"\n"+`data: {"created":true,"message":{"text":"hi"},"streamId":"s1"}`+"\n\n")
+			_, _ = io.WriteString(w, `event: message`+"\n"+`data: {"event":"on_message_delta","data":{"delta":{"content":[{"type":"text","text":"Hel"}]}}}`+"\n\n")
+			_, _ = io.WriteString(w, `event: message`+"\n"+`data: {"event":"on_message_delta","data":{"delta":{"content":[{"type":"text","text":"lo"}]}}}`+"\n\n")
+			_, _ = io.WriteString(w, `event: message`+"\n"+`data: {"event":"on_token_usage","data":{"input_tokens":7,"output_tokens":3}}`+"\n\n")
 			payload, _ := json.Marshal(map[string]any{
 				"final": true,
 				"responseMessage": map[string]any{
@@ -97,12 +101,18 @@ func TestLibreChatSessionChat(t *testing.T) {
 	if !strings.Contains(resp.body, "Hello from the final snapshot") {
 		t.Errorf("final answer missing: %s", resp.body)
 	}
+	// Token usage from on_token_usage reaches the caller.
+	if !strings.Contains(resp.body, `"total_tokens":10`) {
+		t.Errorf("usage missing: %s", resp.body)
+	}
 	if f.logins.Load() != 1 || f.turns.Load() != 1 || f.streams.Load() != 1 {
 		t.Errorf("calls: logins=%d turns=%d streams=%d", f.logins.Load(), f.turns.Load(), f.streams.Load())
 	}
 	// The turn body must use LibreChat's field names, not OpenAI's.
 	start, _ := f.lastStart.Load().(string)
-	for _, want := range []string{`"text":"hi"`, `"conversationId":"new"`, `"agent_id":"ephemeral"`} {
+	// Shape captured from the real UI: no agent_id, endpoint-scoped route, and the
+	// provider name in "endpoint".
+	for _, want := range []string{`"text":"hi"`, `"endpointType":"custom"`, `"isCreatedByUser":true`, `"key":"never"`} {
 		if !strings.Contains(start, want) {
 			t.Errorf("turn body missing %s: %s", want, start)
 		}
@@ -172,5 +182,44 @@ func TestSessionPromptFlattening(t *testing.T) {
 	}
 	if _, _, _, err := chatPromptFromBody([]byte(`{"model":"m","messages":[]}`)); err == nil {
 		t.Error("empty messages accepted")
+	}
+}
+
+// The user's own message echo arrives first and must never be counted as the
+// answer; deltas accumulate in order and the persisted snapshot wins.
+func TestLibreChatStreamParsing(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: message` + "\n" + `data: {"created":true,"message":{"text":"Reply with exactly: PONG"},"streamId":"x"}`,
+		`event: message` + "\n" + `data: {"event":"on_message_delta","data":{"delta":{"content":[{"type":"text","text":"P"}]}}}`,
+		`event: message` + "\n" + `data: {"event":"on_message_delta","data":{"delta":{"content":[{"type":"text","text":"ONG"}]}}}`,
+		`event: message` + "\n" + `data: {"event":"on_token_usage","data":{"input_tokens":10,"output_tokens":2}}`,
+		`event: message` + "\n" + `data: {"final":true,"conversation":{"conversationId":"c"}}`,
+	}, "\n\n") + "\n\n"
+
+	turn, err := parseLibreChatStream(strings.NewReader(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Text != "PONG" {
+		t.Errorf("text = %q, want PONG (the echo must be ignored)", turn.Text)
+	}
+	if turn.PromptTokens != 10 || turn.CompletionTokens != 2 {
+		t.Errorf("usage = %d/%d", turn.PromptTokens, turn.CompletionTokens)
+	}
+}
+
+// A provider-scoped route is used, and the endpoint name follows the model family.
+func TestLibreChatEndpointName(t *testing.T) {
+	cases := map[string]string{
+		"deepseek-chat":         "Deepseek",
+		"gpt-6.1-sol":           "openAI",
+		"claude-opus-5":         "Anthropic",
+		"gemini-3.8-flash":      "Google",
+		"something-unknown-xyz": "openAI",
+	}
+	for model, want := range cases {
+		if got := libreChatEndpointName(model); got != want {
+			t.Errorf("libreChatEndpointName(%q) = %q, want %q", model, got, want)
+		}
 	}
 }

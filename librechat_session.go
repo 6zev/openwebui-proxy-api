@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +48,39 @@ const (
 	// libreChatNoParent is LibreChat's placeholder for "first message".
 	libreChatNoParent = "00000000-0000-0000-0000-000000000000"
 )
+
+// libreChatTimezone matches what the browser sends. UTC keeps the value
+// deterministic; LibreChat only nests the turn under a date bucket.
+const libreChatTimezone = "UTC"
+
+// newLibreChatID returns a v4-shaped identifier. LibreChat requires a string that
+// looks like a message id; it does not validate the RFC 4122 variant bits.
+func newLibreChatID() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	raw[6] = (raw[6] & 0x0f) | 0x40
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
+}
+
+// libreChatEndpointName is the provider family a model belongs to. The web UI sends
+// the endpoint the user picked in the model picker; the proxy derives it from the
+// model id so no extra configuration is needed.
+func libreChatEndpointName(model string) string {
+	switch {
+	case strings.Contains(model, "deepseek"):
+		return "Deepseek"
+	case strings.HasPrefix(model, "claude"), strings.Contains(model, "anthropic"):
+		return "Anthropic"
+	case strings.Contains(model, "gemini"):
+		return "Google"
+	case strings.Contains(model, "gpt"), strings.Contains(model, "o1"), strings.Contains(model, "o3"):
+		return "openAI"
+	}
+	return "openAI"
+}
 
 // libreChatSession is the per-account login state.
 type libreChatSession struct {
@@ -231,17 +266,39 @@ func (p *Proxy) decorateLibreChatRequest(request *http.Request) {
 	request.Header.Set("User-Agent", browserUserAgent)
 	request.Header.Set("Accept", "application/json, text/event-stream")
 	request.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	// requireSameOrigin compares Origin against DOMAIN_CLIENT/DOMAIN_SERVER. A
-	// request without Origin passes; forging one would guess at someone's config.
-	if origin := strings.TrimSpace(p.config.LibreChatOrigin); origin != "" {
+	// requireSameOrigin compares Origin against DOMAIN_CLIENT/DOMAIN_SERVER. The
+	// account's own base URL is the origin a browser would present, so it is derived
+	// automatically; LIBRECHAT_ORIGIN overrides it when the UI is served from a
+	// different host than the API.
+	origin := p.originFor(request.URL)
+	if origin != "" {
 		request.Header.Set("Origin", origin)
 		request.Header.Set("Referer", origin+"/")
 	}
 }
 
+// originFor returns the Origin a browser would send for this URL.
+//
+// "Làm giả request đến từ chính web ui" is exactly what the server checks: Origin
+// must match the deployment's own client URL. The base URL is that value in the
+// common case (API and UI on one host), so no configuration is needed; an explicit
+// override exists for split deployments.
+func (p *Proxy) originFor(target *url.URL) string {
+	if override := strings.TrimSpace(p.config.LibreChatOrigin); override != "" {
+		return strings.TrimRight(override, "/")
+	}
+	if target == nil {
+		return ""
+	}
+	origin := &url.URL{Scheme: target.Scheme, Host: target.Host}
+	return origin.String()
+}
+
 // libreChatTurn is one chat turn: assistant text plus any tool-call side channel.
 type libreChatTurn struct {
-	Text string
+	Text             string
+	PromptTokens     int
+	CompletionTokens int
 }
 
 // libreChatChat runs one turn through the chat UI and returns the assistant text.
@@ -263,28 +320,49 @@ func (p *Proxy) libreChatChat(ctx context.Context, a *account, prompt string, mo
 
 // libreChatStartTurn posts the turn and returns its stream id.
 func (p *Proxy) libreChatStartTurn(ctx context.Context, a *account, token, prompt, model string) (string, error) {
+	// Shape captured from the real web UI (DevTools):
+	//   POST /api/agents/chat/<endpoint>   with endpointType "custom"
+	//   {text, sender, clientTimestamp, isCreatedByUser, parentMessageId,
+	//    messageId, error, endpoint, endpointType, model, key, modelDisplayLabel,
+	//    isTemporary, isRegenerate, isContinued, timezone, clientRequestId}
+	// This is NOT the agents endpoint: there is no agent_id and no
+	// endpointOption. The endpoint name comes from the caller ("Deepseek",
+	// "openAI", ...); "custom" tells LibreChat the model is a provider slug.
+	now := time.Now().UTC().Format("2006-01-02T15:04:05")
+	endpointName := libreChatEndpointName(model)
 	payload := map[string]any{
-		"text":            prompt,
-		"conversationId":  libreChatNewConvo,
-		"parentMessageId": libreChatNoParent,
-		"endpoint":        "agents",
-		"endpointOption": map[string]any{
-			"agent_id":         libreChatEphemeralAgent,
-			"model":            model,
-			"model_parameters": map[string]any{},
-		},
+		"text":              prompt,
+		"sender":            "User",
+		"clientTimestamp":   now,
+		"isCreatedByUser":   true,
+		"parentMessageId":   libreChatNoParent,
+		"messageId":         newLibreChatID(),
+		"error":             false,
+		"endpoint":          endpointName,
+		"endpointType":      "custom",
+		"model":             model,
+		"key":               "never",
+		"modelDisplayLabel": endpointName,
+		"isTemporary":       false,
+		"isRegenerate":      false,
+		"isContinued":       false,
+		"timezone":          libreChatTimezone,
+		"clientRequestId":   newLibreChatID(),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(a.config.BaseURL, "/")+"/api/agents/chat/completions", bytes.NewReader(body))
+	// The web UI posts to /api/agents/chat/<endpoint>, not the collection route.
+	url := strings.TrimRight(a.config.BaseURL, "/") + "/api/agents/chat/" + url.PathEscape(endpointName)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
 	p.decorateLibreChatRequest(request)
+	p.debugf("debug: librechat chat request account=%s path=%s sent=%s", a.config.ID, request.URL.Path, debugBody(body))
 	response, err := a.client.Do(request)
 	if err != nil {
 		return "", err
@@ -296,6 +374,7 @@ func (p *Proxy) libreChatStartTurn(ctx context.Context, a *account, token, promp
 		if detail == "" {
 			detail = fmt.Sprintf("chat answered %d", response.StatusCode)
 		}
+		p.debugf("debug: librechat chat rejected account=%s status=%d body=%s", a.config.ID, response.StatusCode, debugBody(raw))
 		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 			a.libreChatSessionFor().invalidate()
 		}
@@ -336,19 +415,26 @@ func (p *Proxy) libreChatFollowTurn(ctx context.Context, a *account, streamID st
 	return parseLibreChatStream(response.Body)
 }
 
+// debugLibreChatStream dumps raw stream payloads when troubleshooting a shape
+// change; it is off unless the environment asks for it.
+var (
+	debugLibreChatStream           = os.Getenv("LIBRECHAT_STREAM_DEBUG") == "1"
+	debugStreamSink      io.Writer = os.Stderr
+)
+
 // parseLibreChatStream reads LibreChat's agent SSE stream and collects the answer.
 //
-// Event names in the wild: "message" with payloads that carry either a text
-// fragment, a final snapshot ({"final":true,"responseMessage":{...}}), or an error
-// envelope ({"error":...}). The final snapshot is authoritative — it holds the
-// persisted response — so its text wins over the accumulated deltas.
+// The SSE event NAME is always "message"; the meaning lives in the JSON payload's
+// own "event" field (on_message_delta, on_token_usage, on_run_step...). Only the
+// payload matters here, and the final snapshot wins over accumulated deltas because
+// it holds what LibreChat actually persisted.
 func parseLibreChatStream(body io.Reader) (*libreChatTurn, error) {
 	turn := &libreChatTurn{}
 	var text strings.Builder
 	var finalText string
 	decoder := &libreChatEventReader{reader: body}
 	for {
-		name, payload, err := decoder.Next()
+		_, payload, err := decoder.Next()
 		if err == io.EOF {
 			break
 		}
@@ -358,11 +444,18 @@ func parseLibreChatStream(body io.Reader) (*libreChatTurn, error) {
 			}
 			return nil, err
 		}
+		// Stream shape (captured from the live UI):
+		//   {"event":"on_message_delta","data":{"delta":{"content":[{"type":"text","text":"P"}]}}}
+		//   {"event":"on_token_usage","data":{"input_tokens":..,"output_tokens":..}}
+		//   {"final":true,"conversation":{...},"responseMessage":{...}}
+		// The first frame is {"created":true,"message":{...},"streamId":"..."} — the
+		// echo of the user's own message, which must NOT be counted as the answer.
 		var envelope struct {
-			Error           string `json:"error"`
-			Message         string `json:"message"`
-			Text            string `json:"text"`
-			Final           bool   `json:"final"`
+			Event           string          `json:"event"`
+			Created         bool            `json:"created"`
+			Final           bool            `json:"final"`
+			Error           json.RawMessage `json:"error"`
+			Data            json.RawMessage `json:"data"`
 			ResponseMessage *struct {
 				Content *struct {
 					Text string `json:"text"`
@@ -373,19 +466,47 @@ func parseLibreChatStream(body io.Reader) (*libreChatTurn, error) {
 		if json.Unmarshal([]byte(payload), &envelope) != nil {
 			continue
 		}
-		if envelope.Error != "" {
-			return nil, &apiError{status: 502, message: "LibreChat stream error: " + sanitizeDetail(envelope.Error)}
+		if len(envelope.Error) > 0 && string(envelope.Error) != "false" && string(envelope.Error) != "null" {
+			detail := detailText(envelope.Error)
+			if detail != "" {
+				return nil, &apiError{status: 502, message: "LibreChat stream error: " + sanitizeDetail(detail)}
+			}
 		}
+		switch envelope.Event {
+		case "on_message_delta":
+			var delta struct {
+				Delta struct {
+					Content []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"delta"`
+			}
+			if json.Unmarshal(envelope.Data, &delta) == nil {
+				for _, part := range delta.Delta.Content {
+					if part.Type == "text" || part.Type == "" {
+						text.WriteString(part.Text)
+					}
+				}
+			}
+		case "on_token_usage":
+			// Token counts are forwarded to the caller when present.
+			var usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			}
+			if json.Unmarshal(envelope.Data, &usage) == nil {
+				turn.PromptTokens = usage.InputTokens
+				turn.CompletionTokens = usage.OutputTokens
+			}
+		}
+		// The persisted snapshot is authoritative when the stream was cut short.
 		if envelope.ResponseMessage != nil {
 			if envelope.ResponseMessage.Content != nil && envelope.ResponseMessage.Content.Text != "" {
 				finalText = envelope.ResponseMessage.Content.Text
 			} else if envelope.ResponseMessage.Text != "" {
 				finalText = envelope.ResponseMessage.Text
 			}
-		}
-		_ = name // event names vary between LibreChat versions; the payload carries the meaning
-		if envelope.Text != "" && envelope.Message == "" {
-			text.WriteString(envelope.Text)
 		}
 	}
 	if finalText != "" {

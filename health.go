@@ -196,7 +196,7 @@ func (p *Proxy) probe(ctx context.Context, a *account, deep bool) error {
 		// keep routing this account away while the badge reads ok.
 		a.clearStaleBlocks()
 	}
-	path, ok := probePathFor(a.config.Backend)
+	path, ok := probePathForAccount(a)
 	if !ok {
 		err := &apiError{status: 400, message: "backend has no health probe"}
 		a.health.record(err, time.Since(start))
@@ -217,6 +217,12 @@ func (p *Proxy) probe(ctx context.Context, a *account, deep bool) error {
 	}
 	request.Header.Set("Authorization", auth)
 	request.Header.Set("Accept", "application/json")
+	if a.config.Backend == BackendLibreChat && a.config.APIKey == "" {
+		// Session accounts must look like the browser on every call, probe included:
+		// LibreChat's uaParser records a violation otherwise, and violations are what
+		// eventually ban the IP.
+		p.decorateLibreChatRequest(request)
+	}
 	response, err := a.client.Do(request)
 	if err != nil {
 		a.health.record(err, time.Since(start))
@@ -246,6 +252,16 @@ func probePathFor(kind BackendKind) (string, bool) {
 		return path, ok
 	}
 	return "/api/models", true
+}
+
+// probePathForAccount refines probePathFor per account. A LibreChat SESSION account
+// cannot read /api/agents/v1/agents (the Agents API only takes agent keys), so it is
+// probed on the web UI's /api/models — the same route its model list comes from.
+func probePathForAccount(a *account) (string, bool) {
+	if a.config.Backend == BackendLibreChat && a.config.APIKey == "" {
+		return libreChatSessionModelPath(), true
+	}
+	return probePathFor(a.config.Backend)
 }
 
 // probeErrorText turns a probe status into the reason an operator sees. A 401 on

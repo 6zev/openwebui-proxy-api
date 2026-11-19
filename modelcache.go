@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"sync"
@@ -33,6 +34,10 @@ type cachedModel struct {
 	ID      string `json:"id"`
 	Created int64  `json:"created"`
 	OwnedBy string `json:"owned_by"`
+	// Extra carries every other field the upstream sent (name, description,
+	// capabilities, pricing, tags, context length...). The model list is upstream
+	// metadata: dropping it forced clients to guess what a model can do.
+	Extra map[string]json.RawMessage `json:"-"`
 	// Website is set while merging: each model belongs to the website whose
 	// account listed it, so the rendered id can be qualified per model instead of
 	// stamping one website's prefix onto the whole union.
@@ -332,36 +337,131 @@ func (p *Proxy) accountByKey(key string) *account {
 // fetchModelList performs the upstream /models call and parses the list.
 // The returned models carry no Website tag: it is assigned while merging, so a
 // cached batch stays the account's own data.
-func (p *Proxy) fetchModelList(ctx context.Context, a *account) ([]cachedModel, error) {
-	path := "/api/models"
-	if a.config.Backend == BackendLibreChat {
-		mapped, ok := libreChatUpstreamPath("/v1/models")
-		if !ok {
-			return nil, &apiError{status: 404, message: "Endpoint not found"}
-		}
-		path = mapped
+// modelListPathFor picks the models route for an account. A LibreChat session
+// account reads the web UI's /api/models (a session JWT is refused by the Agents
+// API); everything else uses the shared mapping.
+func modelListPathFor(a *account) string {
+	if a.config.Backend == BackendLibreChat && a.config.APIKey == "" {
+		return libreChatSessionModelPath()
 	}
+	return "/api/models"
+}
+
+// parseAnyModelList accepts both shapes a model list arrives in: the OpenAI
+// {"data":[...]} envelope and LibreChat's provider map. One entry point so the
+// request path and the refresher cannot disagree.
+func parseAnyModelList(document []byte) ([]cachedModel, error) {
+	if items := parseProviderMap(document); items != nil {
+		return items, nil
+	}
+	return parseModelList(document)
+}
+
+func (p *Proxy) fetchModelList(ctx context.Context, a *account) ([]cachedModel, error) {
+	path := modelListPathFor(a)
 	response, err, _ := p.requestWithHeaders(ctx, a, path, "GET", nil, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer response.Body.Close()
+	rawDocument, _ := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	return parseAnyModelList(rawDocument)
+}
+
+// parseProviderMap flattens LibreChat's /api/models shape. It returns nil when the
+// document is not a provider map, so callers fall back to the OpenAI shape.
+func parseProviderMap(document []byte) []cachedModel {
+	var providers map[string]json.RawMessage
+	if json.Unmarshal(document, &providers) != nil || len(providers) == 0 {
+		return nil
+	}
+	if _, hasData := providers["data"]; hasData {
+		return nil
+	}
+	items := make([]cachedModel, 0, 32)
+	seen := make(map[string]bool, 32)
+	providerNames := make([]string, 0, len(providers))
+	for name := range providers {
+		providerNames = append(providerNames, name)
+	}
+	sortStrings(providerNames)
+	for _, provider := range providerNames {
+		var ids []string
+		if json.Unmarshal(providers[provider], &ids) != nil {
+			continue
+		}
+		for _, id := range ids {
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			items = append(items, cachedModel{ID: id, OwnedBy: provider})
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return items
+}
+
+// parseModelList turns an upstream model-list body into cached models, keeping every
+// field the struct does not name. Both the background refresher and the request path
+// go through here: they used to parse separately, and only one of them kept extras.
+func parseModelList(document []byte) ([]cachedModel, error) {
 	var envelope struct {
 		Data json.RawMessage `json:"data"`
 	}
-	decoder := json.NewDecoder(response.Body)
-	if err := decoder.Decode(&envelope); err != nil {
-		return nil, &apiError{status: 502, message: "Unexpected model-list response"}
-	}
-	raw := envelope.Data
-	if raw == nil {
-		return nil, &apiError{status: 502, message: "Unexpected model-list response"}
+	raw := document
+	if json.Unmarshal(document, &envelope) == nil && envelope.Data != nil {
+		raw = envelope.Data
 	}
 	var items []cachedModel
-	if err := json.Unmarshal(raw, &items); err != nil || items == nil {
+	if json.Unmarshal(raw, &items) != nil {
 		return nil, &apiError{status: 502, message: "Unexpected model-list response"}
 	}
-	return items, nil
+	if items == nil {
+		return nil, &apiError{status: 502, message: "Unexpected model-list response"}
+	}
+	filtered := make([]cachedModel, 0, len(items))
+	for _, item := range items {
+		if item.ID == "" {
+			continue
+		}
+		if item.OwnedBy == "" {
+			item.OwnedBy = "open-webui"
+		}
+		filtered = append(filtered, item)
+	}
+	attachModelExtras(raw, filtered)
+	return filtered, nil
+}
+
+// attachModelExtras keeps every field of each upstream model that the struct does
+// not name. Without this a caller sees only id/created/owned_by, so capabilities,
+// pricing, context length and display names never reach the client.
+func attachModelExtras(raw json.RawMessage, items []cachedModel) {
+	var documents []map[string]json.RawMessage
+	if json.Unmarshal(raw, &documents) != nil {
+		return
+	}
+	for i := range items {
+		if i >= len(documents) || documents[i] == nil {
+			continue
+		}
+		extra := make(map[string]json.RawMessage, len(documents[i]))
+		kept := false
+		for key, value := range documents[i] {
+			switch key {
+			case "id", "created", "owned_by":
+				continue
+			}
+			extra[key] = value
+			kept = true
+		}
+		if kept {
+			items[i].Extra = extra
+		}
+	}
 }
 
 // modelCacheKeyFor picks the cache key for a request. A pinned account gets its
@@ -404,7 +504,17 @@ func writeModelList(w http.ResponseWriter, models []cachedModel, fallback string
 		if prefix != "" {
 			id = prefix + "/" + m.ID
 		}
-		out = append(out, map[string]any{"id": id, "object": "model", "created": m.Created, "owned_by": m.OwnedBy})
+		entry := make(map[string]any, len(m.Extra)+4)
+		for key, value := range m.Extra {
+			// Raw messages are re-emitted verbatim; a field the caller ignores costs
+			// nothing, a field that was dropped cannot be recovered.
+			entry[key] = value
+		}
+		entry["id"] = id
+		entry["object"] = "model"
+		entry["created"] = m.Created
+		entry["owned_by"] = m.OwnedBy
+		out = append(out, entry)
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": out})
 }
