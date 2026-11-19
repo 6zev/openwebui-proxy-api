@@ -392,7 +392,17 @@ func (p *Proxy) fetchModelList(ctx context.Context, a *account) ([]cachedModel, 
 	}
 	defer response.Body.Close()
 	rawDocument, _ := io.ReadAll(io.LimitReader(response.Body, 8<<20))
-	return parseAnyModelList(rawDocument)
+	models, err := parseAnyModelList(rawDocument)
+	if err != nil {
+		return nil, err
+	}
+	// A session deployment lists ids only. Decorate them with the endpoint's display
+	// label and capabilities so a client sees the same detail an OpenAI-shaped
+	// upstream would have sent.
+	if a.config.Backend == BackendLibreChat && a.config.APIKey == "" {
+		applyEndpointMetadata(models, p.libreChatEndpoints(ctx, a))
+	}
+	return models, nil
 }
 
 // parseProviderMap flattens LibreChat's /api/models shape. It returns nil when the

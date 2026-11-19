@@ -244,11 +244,11 @@
     $('account-rows').replaceChildren(...accounts.map((account) => {
       const row = node('tr');
       const controls = node('div', 'row-actions');
-      const accountKey = account.key || account.id;
+      const accountKey = accountKeyOf(account);
       const test = action(testing.has(accountKey) ? 'Đang thử…' : 'Kiểm tra', 'test-account', accountKey);
       test.disabled = testing.has(accountKey);
       controls.append(test, action('Sửa', 'edit-account', accountKey), action('Xóa', 'delete-account', accountKey, true));
-      row.append(cell(node('strong', '', account.name || account.id), node('small', '', account.email || '—'), node('small', '', account.key || account.id)), cell(node('span', '', websiteName(account.website_id))), cell(status(account)), cell(node('span', '', account.backend === 'librechat' ? (account.has_api_key ? 'Agent key: đã lưu' : 'Agent key: chưa có') : (account.has_password ? 'Mật khẩu: đã lưu' : 'Mật khẩu: chưa có')), node('small', '', account.backend === 'librechat' ? 'backend: LibreChat Agents' : 'backend: Open WebUI'), node('small', '', account.proxy_configured ? 'Proxy: đã cấu hình' : 'Proxy: mặc định / kế thừa')), cell(controls));
+      row.append(cell(node('strong', '', account.name || account.id), node('small', '', account.email || '—'), node('small', '', accountKeyOf(account))), cell(node('span', '', websiteName(account.website_id))), cell(status(account)), cell(node('span', '', account.backend === 'librechat' ? (account.has_api_key ? 'Agent key: đã lưu' : 'Agent key: chưa có') : (account.has_password ? 'Mật khẩu: đã lưu' : 'Mật khẩu: chưa có')), node('small', '', account.backend === 'librechat' ? 'backend: LibreChat Agents' : 'backend: Open WebUI'), node('small', '', account.proxy_configured ? 'Proxy: đã cấu hình' : 'Proxy: mặc định / kế thừa')), cell(controls));
       return row;
     }));
     $('account-empty').hidden = accounts.length !== 0;
@@ -358,9 +358,16 @@
     editor = null;
   }
 
+  // accountKeyOf is the one place that decides an account's identity. Two websites
+  // may each own an account called "acc", so the composite key is the ONLY
+  // unambiguous address; a bare-ID match silently picked the first one and the
+  // editor then saved into the wrong website (reported as a duplicate-ID clash).
+  function accountKeyOf(account) {
+    return account.key || (account.website_id ? `${account.website_id}/${account.id}` : account.id);
+  }
+
   function findAccount(keyOrID) {
-    return state.accounts.find((item) => (item.key || item.id) === keyOrID)
-      || state.accounts.find((item) => item.id === keyOrID);
+    return state.accounts.find((item) => accountKeyOf(item) === keyOrID) || null;
   }
 
   function openEditor(kind, id) {
@@ -372,7 +379,7 @@
     if (kind === 'account' && !state.websites.length) { notice('Thêm website trước khi tạo tài khoản.', true); return; }
     // Accounts are addressed by their composite key so two websites may share
     // an account ID; websites keep their plain ID.
-    editor = { kind, id: entity ? (kind === 'account' ? (entity.key || entity.id) : entity.id) : null };
+    editor = { kind, id: entity ? (kind === 'account' ? accountKeyOf(entity) : entity.id) : null };
     $('editor-form').reset();
     $('editor-error').hidden = true;
     $('editor-title').textContent = `${entity ? 'Chỉnh sửa' : 'Thêm'} ${kind === 'website' ? 'website' : 'tài khoản'}`;
@@ -511,7 +518,7 @@
       ? state.websites.find((item) => item.id === id)
       : findAccount(id);
     if (!entity) return;
-    deletion = { kind, id: (entity.key || entity.id), accountId: entity.id };
+    deletion = { kind, id: (entity.key || accountKeyOf(entity)), accountId: entity.id };
     $('delete-error').hidden = true;
     $('confirm-delete-button').disabled = false;
     $('delete-description').textContent = `Xóa ${kind === 'website' ? 'website' : 'tài khoản'} “${entity.name || entity.id}” (${entity.id})? ${kind === 'website' ? 'Hãy xóa các tài khoản thuộc website trước. ' : ''}Thao tác này không thể hoàn tác.`;

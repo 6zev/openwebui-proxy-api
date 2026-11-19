@@ -189,6 +189,12 @@ func libreChatRouteFor(path string) (libreChatRoute, bool) {
 // answers the provider map the UI itself displays.
 func libreChatSessionModelPath() string { return "/api/models" }
 
+// libreChatEndpointsPath is where LibreChat describes each endpoint: display label,
+// order, type and capabilities (file_search, web_search, execute_code, subagents...).
+// The model list carries only ids, so this is the one source of "what can this model
+// do" metadata on a session deployment.
+func libreChatEndpointsPath() string { return "/api/endpoints" }
+
 func libreChatUpstreamPath(path string) (string, bool) {
 	for _, route := range libreChatRoutes {
 		if route.from == path {

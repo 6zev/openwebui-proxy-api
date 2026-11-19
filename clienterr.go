@@ -61,17 +61,19 @@ func detailText(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &text) == nil {
 		return sanitizeDetail(text)
 	}
+	// Only the fields that can carry prose are typed. Anything else in the object
+	// must not break the decode: a numeric "code": 402 used to make the whole
+	// unmarshal fail and the message was lost.
 	var object struct {
-		Message string `json:"message"`
-		Detail  string `json:"detail"`
-		Code    string `json:"code"`
+		Message string          `json:"message"`
+		Detail  json.RawMessage `json:"detail"`
 	}
 	if json.Unmarshal(raw, &object) == nil {
 		if object.Message != "" {
 			return sanitizeDetail(object.Message)
 		}
-		if object.Detail != "" {
-			return sanitizeDetail(object.Detail)
+		if text := detailText(object.Detail); text != "" {
+			return text
 		}
 	}
 	var list []struct {

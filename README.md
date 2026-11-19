@@ -319,6 +319,16 @@ Shape body (lấy từ DevTools của UI thật):
 
 `temperature`, `top_p`, `max_tokens`/`max_completion_tokens`, `frequency_penalty`, `presence_penalty`, `seed`, `stop` của client được chuyển vào `endpointOption.model_parameters` của body LibreChat — đó là kênh duy nhất mà agent build đọc rồi đẩy xuống SDK provider. Không set thì **không gửi** block, để upstream giữ default của nó.
 
+### Metadata model của LibreChat
+
+`/api/models` chỉ trả **id**. Những gì client muốn hiển thị cạnh tên model nằm ở `GET /api/endpoints`: `modelDisplayLabel`, `type`, `order`, `capabilities` (file_search, web_search, execute_code, subagents…). Proxy đọc bảng đó (cache 1 giờ/acc) và gắn vào từng model dưới khoá `x_endpoint_label`, `x_endpoint_type`, `x_endpoint_capabilities`.
+
+Lưu ý thật: `/api/endpoints` **chỉ liệt kê endpoint custom**. Provider built-in (openAI, anthropic, google, bedrock, assistants, azureAssistants…) không có trong đó, nên proxy điền label từ bảng tên đã biết.
+
+### Lỗi "fewer max_tokens"
+
+Khi upstream từ chối vì ngân sách (`This request requires more credits, or fewer max_tokens ... can only afford 106664`), proxy **đọc con số đó**, hạ `max_tokens`/`max_completion_tokens` xuống đúng mức, rồi thử lại **một lần**. Request không có budget thì được đặt cap. Chỉ áp cho refusal có nêu con số; lỗi hết credit chung chung thì vẫn báo nguyên văn.
+
 ### Ẩn model chết
 
 Khi upstream trả lời rằng **provider không có credential** (`no_user_key`, `openAI API Key not provided`, `illegal_model_request`, `endpoint_models_not_loaded`, `api key not provided`), model đó bị coi là **không dùng được** trên deployment ấy: nó bị ẩn khỏi `/v1/models` trong `PROVIDER_COOLDOWN_SECONDS` (mặc định 30 phút) và lỗi trả về nói rõ nguyên nhân thay vì trông như lỗi tạm thời. Tắt bằng `HIDE_UNAVAILABLE_MODELS=0`.

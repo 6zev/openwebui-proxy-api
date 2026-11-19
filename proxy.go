@@ -118,6 +118,9 @@ type account struct {
 	health        accountHealth
 }
 type Proxy struct {
+	// endpointInfo caches LibreChat /api/endpoints per account: the only source of
+	// display label and capability metadata behind a session deployment.
+	endpointInfo  *libreChatEndpointCache
 	config        Config
 	key           [32]byte
 	accounts      []*account
@@ -217,7 +220,7 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 	}
 	c.Websites = append([]WebsiteConfig{}, c.Websites...)
 	c.Accounts = append([]AccountConfig{}, c.Accounts...)
-	p := &Proxy{config: c, key: sha256.Sum256([]byte(c.APIKey)), sites: make(map[string]WebsiteConfig), nextByWebsite: make(map[string]int), usage: newUsageStats()}
+	p := &Proxy{config: c, key: sha256.Sum256([]byte(c.APIKey)), sites: make(map[string]WebsiteConfig), nextByWebsite: make(map[string]int), usage: newUsageStats(), endpointInfo: &libreChatEndpointCache{entries: map[string]libreChatEndpointEntry{}}}
 	if c.ModelCacheTTL > 0 {
 		p.modelCache = newAdaptiveModelCache(c.ModelCacheTTL, c.ModelCacheMaxTTL)
 		if c.DisableAdaptiveCache {
@@ -752,6 +755,21 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 			}
 			e.message = "Upstream has no credential for this provider: " + e.message
 			return nil, e, false
+		}
+		// A "fewer max_tokens" refusal names the ceiling the account can afford.
+		// Lowering the budget and asking once more serves the request instead of
+		// returning a 402 the caller could do nothing about.
+		if limit, ok := budgetRefusal(errorExcerpt); ok && attempt == 0 {
+			if clamped, changed := clampMaxTokens(body, limit); changed {
+				body = clamped
+				p.debugf("debug: retrying with max_tokens lowered to %d account=%s", limit, a.config.ID)
+				continue
+			}
+			if capped, changed := capMaxTokens(body, limit); changed {
+				body = capped
+				p.debugf("debug: retrying with max_tokens capped at %d account=%s", limit, a.config.ID)
+				continue
+			}
 		}
 		if p.shouldRetryAnotherAccount(resp.StatusCode, errorExcerpt) {
 			// Only this model is drained: Open WebUI fans out to several providers,
