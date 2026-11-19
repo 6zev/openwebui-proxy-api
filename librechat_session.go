@@ -341,12 +341,12 @@ type libreChatTurn struct {
 // LibreChat answers the POST with a streamId and delivers the turn over a separate
 // SSE subscription, so this performs both halves. It never retries a login
 // rejection; a normal upstream failure surfaces as an apiError.
-func (p *Proxy) libreChatChat(ctx context.Context, a *account, prompt string, model string) (*libreChatTurn, error) {
+func (p *Proxy) libreChatChat(ctx context.Context, a *account, prompt string, model string, params map[string]any) (*libreChatTurn, error) {
 	token, err := p.libreChatToken(ctx, a)
 	if err != nil {
 		return nil, err
 	}
-	streamID, err := p.libreChatStartTurn(ctx, a, token, prompt, model)
+	streamID, err := p.libreChatStartTurn(ctx, a, token, prompt, model, params)
 	if err != nil {
 		return nil, err
 	}
@@ -354,7 +354,7 @@ func (p *Proxy) libreChatChat(ctx context.Context, a *account, prompt string, mo
 }
 
 // libreChatStartTurn posts the turn and returns its stream id.
-func (p *Proxy) libreChatStartTurn(ctx context.Context, a *account, token, prompt, model string) (string, error) {
+func (p *Proxy) libreChatStartTurn(ctx context.Context, a *account, token, prompt, model string, params map[string]any) (string, error) {
 	// Shape captured from the real web UI (DevTools):
 	//   POST /api/agents/chat/<endpoint>   with endpointType "custom"
 	//   {text, sender, clientTimestamp, isCreatedByUser, parentMessageId,
@@ -383,6 +383,16 @@ func (p *Proxy) libreChatStartTurn(ctx context.Context, a *account, token, promp
 		"isContinued":       false,
 		"timezone":          libreChatTimezone,
 		"clientRequestId":   newLibreChatID(),
+	}
+	// Sampling parameters travel in endpointOption.model_parameters: LibreChat's
+	// agent build turns that object into the agent's llmConfig, and its modelKwargs
+	// are handed to the provider SDK unchanged. Omitting this block means the caller's
+	// temperature / max_tokens / top_p are silently ignored — the request would still
+	// succeed, just not as asked.
+	if len(params) > 0 {
+		payload["endpointOption"] = map[string]any{
+			"model_parameters": params,
+		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -504,7 +514,9 @@ func parseLibreChatStream(body io.Reader) (*libreChatTurn, error) {
 		if len(envelope.Error) > 0 && string(envelope.Error) != "false" && string(envelope.Error) != "null" {
 			detail := detailText(envelope.Error)
 			if detail != "" {
-				return nil, &apiError{status: 502, message: "LibreChat stream error: " + sanitizeDetail(detail)}
+				// A stream-level refusal still names its cause; carry the flag so the
+				// caller can stop advertising this model.
+				return nil, &apiError{status: 502, message: "LibreChat stream error: " + sanitizeDetail(detail), providerDead: isProviderUnavailable([]byte(detail))}
 			}
 		}
 		switch envelope.Event {

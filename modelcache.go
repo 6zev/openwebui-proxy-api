@@ -347,6 +347,33 @@ func modelListPathFor(a *account) string {
 	return "/api/models"
 }
 
+// visibleModels drops models the account already refused. The filter runs at render
+// time, not while merging, because a rejection happens AFTER the list was cached —
+// filtering during the merge would only take effect on the next refresh.
+func (p *Proxy) visibleModels(candidates []*account, models []cachedModel) []cachedModel {
+	if !p.config.HideUnavailableModels || len(models) == 0 {
+		return models
+	}
+	hidden := make(map[string]bool, 8)
+	for _, a := range candidates {
+		for _, model := range models {
+			if cooled, _ := p.modelCooled(a, model.ID); cooled {
+				hidden[model.ID] = true
+			}
+		}
+	}
+	if len(hidden) == 0 {
+		return models
+	}
+	kept := make([]cachedModel, 0, len(models))
+	for _, model := range models {
+		if !hidden[model.ID] {
+			kept = append(kept, model)
+		}
+	}
+	return kept
+}
+
 // parseAnyModelList accepts both shapes a model list arrives in: the OpenAI
 // {"data":[...]} envelope and LibreChat's provider map. One entry point so the
 // request path and the refresher cannot disagree.

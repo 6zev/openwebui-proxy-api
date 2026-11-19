@@ -58,6 +58,12 @@ type Config struct {
 	// upstream error body. It never logs credentials: auth headers and the
 	// proxy keys are excluded by construction.
 	DebugLog bool
+	// ProviderUnavailableCooldown is how long a model stays out of the listing after
+	// its upstream provider answered that it has no credential.
+	ProviderUnavailableCooldown time.Duration
+	// HideUnavailableModels removes such models from /v1/models instead of listing
+	// them and failing when a caller picks one.
+	HideUnavailableModels bool
 	// LibreChatOrigin is sent as Origin/Referer when signing in to LibreChat.
 	// Empty means no Origin header, which LibreChat's requireSameOrigin accepts.
 	LibreChatOrigin string
@@ -133,6 +139,10 @@ type apiError struct {
 	// quota marks a rejection caused by the account's credit/quota state, which
 	// makes another account worth trying.
 	quota bool
+	// providerDead marks a rejection caused by a provider that has no credential
+	// configured upstream. No account can fix it, and the model stays unusable until
+	// the operator adds the key.
+	providerDead bool
 	// website/account name the target that refused, which the console surfaces;
 	// they are never sent to the API caller.
 	website string
@@ -245,7 +255,7 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 		}
 		key := accountKey(a.WebsiteID, a.ID)
 		if ids[key] {
-			return nil, fmt.Errorf("duplicate account ID %q in website %q", a.ID, a.WebsiteID)
+			return nil, fmt.Errorf("account ID %q already exists in website %q: pick a different ID, or move the other account first (IDs only have to be unique inside one website, so \"<website-id>/<account-id>\" tells two accounts apart)", a.ID, a.WebsiteID)
 		}
 		ids[key] = true
 		if err := validateBackendAccount(a); err != nil {
@@ -733,6 +743,16 @@ func (p *Proxy) requestWithHeaders(ctx context.Context, a *account, path, method
 		// A spent balance is about this account, not the request: cool it down so
 		// round-robin stops sending chats into a wall, and let the caller's account
 		// loop try another one.
+		// A provider with no credential configured will never answer, whatever the
+		// account. Mark the model so the listing can stop advertising it, and say so
+		// plainly instead of looking like a transient upstream fault.
+		if isProviderUnavailable(errorExcerpt) {
+			if model := requestModel(body); model != "" {
+				p.cooldownModel(a, model, p.config.providerUnavailableFor())
+			}
+			e.message = "Upstream has no credential for this provider: " + e.message
+			return nil, e, false
+		}
 		if p.shouldRetryAnotherAccount(resp.StatusCode, errorExcerpt) {
 			// Only this model is drained: Open WebUI fans out to several providers,
 			// so a spent OpenAI balance says nothing about Claude on the same
@@ -773,6 +793,42 @@ func (p *Proxy) shouldRetryAnotherAccount(status int, body []byte) bool {
 	}
 	detail := strings.ToLower(upstreamDetail(body))
 	for _, marker := range []string{"no credits remaining", "credit balance is too low", "insufficient_quota", "exceeded your current quota", "quota exceeded", "out of credits"} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// providerUnavailableFor is how long a model stays hidden after its provider
+// answered "no credential". Re-checking costs one failed chat per model, so the
+// window is long enough to matter and short enough to notice a fixed key.
+func (c Config) providerUnavailableFor() time.Duration {
+	if c.ProviderUnavailableCooldown > 0 {
+		return c.ProviderUnavailableCooldown
+	}
+	return 30 * time.Minute
+}
+
+// providerUnavailableMarkers are replies that mean the upstream has no usable
+// credential or permit for that provider. They are not the caller's fault and no
+// retry on another ACCOUNT helps when every account shares the same missing key.
+var providerUnavailableMarkers = []string{
+	"no_user_key",
+	"openai api key not provided",
+	"illegal_model_request",
+	"endpoint_models_not_loaded",
+	"api key not provided",
+	"missing_api_key",
+	"api key is not set",
+}
+
+// isProviderUnavailable reports whether the upstream refused because a provider
+// behind it has no credential configured. The model is then unusable through this
+// deployment no matter how often it is asked.
+func isProviderUnavailable(body []byte) bool {
+	detail := strings.ToLower(upstreamDetail(body))
+	for _, marker := range providerUnavailableMarkers {
 		if strings.Contains(detail, marker) {
 			return true
 		}
@@ -933,7 +989,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !list.fetched.IsZero() {
 				w.Header().Set("X-Model-Cache-Age", ageSeconds(list.fetched))
 			}
-			writeModelList(w, list.models, p.modelPrefixFor(r, candidates))
+			writeModelList(w, p.visibleModels(candidates, list.models), p.modelPrefixFor(r, candidates))
 			if list.anyStale {
 				go p.refreshAllCandidates(context.WithoutCancel(r.Context()), candidates)
 			}
@@ -948,7 +1004,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !list.fetched.IsZero() {
 				w.Header().Set("X-Model-Cache-Age", ageSeconds(list.fetched))
 			}
-			writeModelList(w, list.models, p.modelPrefixFor(r, candidates))
+			writeModelList(w, p.visibleModels(candidates, list.models), p.modelPrefixFor(r, candidates))
 			return
 		}
 	}
@@ -1029,7 +1085,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("X-Model-Cache", "stale-error")
 				w.Header().Set("X-Model-Cache-Age", ageSeconds(list.fetched))
 				w.Header().Set("X-Cache-Error", "upstream-failed")
-				writeModelList(w, list.models, p.modelPrefixFor(r, candidates))
+				writeModelList(w, p.visibleModels(candidates, list.models), p.modelPrefixFor(r, candidates))
 				return
 			}
 		}
@@ -1222,7 +1278,7 @@ func (p *Proxy) isSessionChat(candidates []*account) bool {
 // parked and the next candidate is tried, but a turn that already started is never
 // replayed — the upstream may have persisted it.
 func (p *Proxy) serveLibreChatSessionChat(w http.ResponseWriter, r *http.Request, body []byte, candidates []*account) {
-	model, prompt, stream, err := chatPromptFromBody(body)
+	model, prompt, stream, params, err := chatPromptFromBodyWithParams(body)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1239,9 +1295,19 @@ func (p *Proxy) serveLibreChatSessionChat(w http.ResponseWriter, r *http.Request
 		w.Header().Set("X-Account-ID", a.config.ID)
 		w.Header().Set("X-Website-ID", a.config.WebsiteID)
 		w.Header().Set("X-Compat-Mode", "librechat-session")
-		turn, chatErr := p.libreChatChat(ctx, a, prompt, model)
+		turn, chatErr := p.libreChatChat(ctx, a, prompt, model, params)
 		if chatErr != nil {
 			lastErr = chatErr
+			// A provider without a credential refuses this model forever, so hide it
+			// from the listing instead of letting the next caller pick it again.
+			var typed *apiError
+			dead := isProviderUnavailable([]byte(chatErr.Error()))
+			if errors.As(chatErr, &typed) && typed.providerDead {
+				dead = true
+			}
+			if dead {
+				p.cooldownModel(a, model, p.config.providerUnavailableFor())
+			}
 			p.usage.record(a.config.WebsiteID, 0, model, chatErr.Error())
 			if r.Header.Get("X-Account-ID") != "" {
 				break
@@ -1263,19 +1329,60 @@ func (p *Proxy) serveLibreChatSessionChat(w http.ResponseWriter, r *http.Request
 // call, so a multi-turn history is flattened into a transcript the model can read;
 // nothing is invented and no state is kept across calls.
 func chatPromptFromBody(body []byte) (string, string, bool, error) {
+	model, prompt, stream, _, err := chatPromptFromBodyWithParams(body)
+	return model, prompt, stream, err
+}
+
+// chatPromptFromBodyWithParams also returns the sampling parameters the caller set.
+// LibreChat reads them from agent model_parameters, so carrying them across is the
+// difference between honouring temperature/max_tokens and silently ignoring them.
+func chatPromptFromBodyWithParams(body []byte) (string, string, bool, map[string]any, error) {
 	var request struct {
-		Model    string `json:"model"`
-		Stream   bool   `json:"stream"`
-		Messages []struct {
+		Model               string          `json:"model"`
+		Stream              bool            `json:"stream"`
+		Temperature         *float64        `json:"temperature"`
+		TopP                *float64        `json:"top_p"`
+		MaxTokens           *int            `json:"max_tokens"`
+		MaxCompletionTokens *int            `json:"max_completion_tokens"`
+		FrequencyPenalty    *float64        `json:"frequency_penalty"`
+		PresencePenalty     *float64        `json:"presence_penalty"`
+		Stop                json.RawMessage `json:"stop"`
+		Seed                *int            `json:"seed"`
+		Messages            []struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &request); err != nil {
-		return "", "", false, &apiError{status: 400, message: "Invalid JSON body"}
+		return "", "", false, nil, &apiError{status: 400, message: "Invalid JSON body"}
 	}
 	if len(request.Messages) == 0 {
-		return "", "", false, &apiError{status: 400, message: "messages[] is required"}
+		return "", "", false, nil, &apiError{status: 400, message: "messages[] is required"}
+	}
+	params := map[string]any{}
+	if request.Temperature != nil {
+		params["temperature"] = *request.Temperature
+	}
+	if request.TopP != nil {
+		params["top_p"] = *request.TopP
+	}
+	if request.MaxTokens != nil {
+		params["max_tokens"] = *request.MaxTokens
+	}
+	if request.MaxCompletionTokens != nil {
+		params["max_output_tokens"] = *request.MaxCompletionTokens
+	}
+	if request.FrequencyPenalty != nil {
+		params["frequency_penalty"] = *request.FrequencyPenalty
+	}
+	if request.PresencePenalty != nil {
+		params["presence_penalty"] = *request.PresencePenalty
+	}
+	if request.Seed != nil {
+		params["seed"] = *request.Seed
+	}
+	if len(request.Stop) > 0 && string(request.Stop) != "null" {
+		params["stop"] = request.Stop
 	}
 	var transcript strings.Builder
 	last := ""
@@ -1295,13 +1402,13 @@ func chatPromptFromBody(body []byte) (string, string, bool, error) {
 		}
 	}
 	if last == "" {
-		return "", "", false, &apiError{status: 400, message: "messages[] carried no text content"}
+		return "", "", false, nil, &apiError{status: 400, message: "messages[] carried no text content"}
 	}
 	// A single user turn is sent verbatim: LibreChat already has the conversation.
 	if len(request.Messages) == 1 && request.Messages[0].Role != "system" {
-		return request.Model, last, request.Stream, nil
+		return request.Model, last, request.Stream, params, nil
 	}
-	return request.Model, strings.TrimSpace(transcript.String()), request.Stream, nil
+	return request.Model, strings.TrimSpace(transcript.String()), request.Stream, params, nil
 }
 
 // messageText flattens a message content value (string or part list).

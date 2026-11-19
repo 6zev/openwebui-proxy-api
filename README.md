@@ -315,6 +315,14 @@ Shape body (lấy từ DevTools của UI thật):
  "isContinued":false,"timezone":"UTC","clientRequestId":"<uuid>"}
 ```
 
+### Model Parameters (LibreChat)
+
+`temperature`, `top_p`, `max_tokens`/`max_completion_tokens`, `frequency_penalty`, `presence_penalty`, `seed`, `stop` của client được chuyển vào `endpointOption.model_parameters` của body LibreChat — đó là kênh duy nhất mà agent build đọc rồi đẩy xuống SDK provider. Không set thì **không gửi** block, để upstream giữ default của nó.
+
+### Ẩn model chết
+
+Khi upstream trả lời rằng **provider không có credential** (`no_user_key`, `openAI API Key not provided`, `illegal_model_request`, `endpoint_models_not_loaded`, `api key not provided`), model đó bị coi là **không dùng được** trên deployment ấy: nó bị ẩn khỏi `/v1/models` trong `PROVIDER_COOLDOWN_SECONDS` (mặc định 30 phút) và lỗi trả về nói rõ nguyên nhân thay vì trông như lỗi tạm thời. Tắt bằng `HIDE_UNAVAILABLE_MODELS=0`.
+
 Stream: SSE event name luôn là `message`; ngữ nghĩa nằm trong field `event` của payload — `on_message_delta` (có `delta.content[].text`), `on_token_usage` (token), và frame cuối `{"final":true,...}`. Frame đầu tiên là echo tin nhắn của chính người dùng nên **không** được tính vào câu trả lời. Bật `LIBRECHAT_STREAM_DEBUG=1` để dump payload thô khi upstream đổi format.
 - `LIBRECHAT_ORIGIN` chỉ cần đặt khi instance bật kiểm `Origin` chặt (gửi kèm `Origin`/`Referer`).
 

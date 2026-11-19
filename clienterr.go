@@ -25,6 +25,10 @@ func upstreamDetail(raw []byte) string {
 		Detail  json.RawMessage `json:"detail"`
 		Error   json.RawMessage `json:"error"`
 		Message string          `json:"message"`
+		// LibreChat reports machine-readable failures as {"type":"no_user_key"} or
+		// {"type":"illegal_model_request","info":"..."} — no detail, no error.
+		Type string `json:"type"`
+		Info string `json:"info"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return ""
@@ -34,6 +38,12 @@ func upstreamDetail(raw []byte) string {
 	}
 	if text := detailText(envelope.Error); text != "" {
 		return text
+	}
+	if envelope.Type != "" {
+		if envelope.Info != "" {
+			return sanitizeDetail(envelope.Type + " " + envelope.Info)
+		}
+		return sanitizeDetail(envelope.Type)
 	}
 	// LibreChat answers 403 with {"message":"Your account has been temporarily
 	// banned due to violations of our service."} — no detail, no error object.

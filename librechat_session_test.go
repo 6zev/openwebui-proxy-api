@@ -247,3 +247,35 @@ func TestLibreChatEndpointFromModelList(t *testing.T) {
 		}
 	}
 }
+
+// Sampling parameters the caller set must reach LibreChat as agent model_parameters,
+// which is the only channel its provider SDK reads them from.
+func TestLibreChatForwardsModelParameters(t *testing.T) {
+	model, prompt, stream, params, err := chatPromptFromBodyWithParams([]byte(`{
+		"model":"deepseek-chat","stream":true,
+		"temperature":0.2,"top_p":0.9,"max_tokens":512,
+		"frequency_penalty":0.1,"presence_penalty":0.3,"seed":7,
+		"stop":["\n\n"],
+		"messages":[{"role":"user","content":"hi"}]
+	}`))
+	if err != nil || model != "deepseek-chat" || prompt != "hi" || !stream {
+		t.Fatalf("parse: model=%q prompt=%q stream=%v err=%v", model, prompt, stream, err)
+	}
+	want := map[string]any{
+		"temperature": 0.2, "top_p": 0.9, "max_tokens": 512,
+		"frequency_penalty": 0.1, "presence_penalty": 0.3, "seed": 7,
+	}
+	for key, value := range want {
+		if params[key] != value {
+			t.Errorf("%s = %v, want %v", key, params[key], value)
+		}
+	}
+	if string(params["stop"].(json.RawMessage)) != `["\n\n"]` {
+		t.Errorf("stop = %s", params["stop"])
+	}
+	// Nothing set means no block at all, so the upstream keeps its own defaults.
+	_, _, _, empty, _ := chatPromptFromBodyWithParams([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if len(empty) != 0 {
+		t.Errorf("unset params should not be invented: %v", empty)
+	}
+}

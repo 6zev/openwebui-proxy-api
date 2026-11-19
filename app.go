@@ -260,7 +260,13 @@ func (a *Application) mutate(change func(*configDocument) error) error {
 	nextCfg.Accounts = doc.Accounts
 	next, err := buildProxy(nextCfg, true)
 	if err != nil {
-		return &apiError{status: 400, message: err.Error()}
+		// A uniqueness clash is a conflict with the saved configuration, not a
+		// malformed request: 409 tells the caller the input was well-formed.
+		status := 400
+		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "duplicate") {
+			status = 409
+		}
+		return &apiError{status: status, message: err.Error()}
 	}
 	// Preserve tokens, cooldown and connection pools for accounts whose effective
 	// credentials, website and outbound transport have not changed.
@@ -441,9 +447,13 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 			if draft.WebsiteID != nil {
 				targetSite = strings.TrimSpace(*draft.WebsiteID)
 			}
-			for _, c := range doc.Accounts {
+			for i, c := range doc.Accounts {
+				// An edit re-submits the account being edited; that is not a clash.
+				if r.Method == http.MethodPut && i == index {
+					continue
+				}
 				if c.ID == accountID && c.WebsiteID == targetSite {
-					return &apiError{status: 409, message: "Account ID already exists in this website"}
+					return &apiError{status: 409, message: fmt.Sprintf("account ID %q already exists in website %q — pick another ID for this account, or move the existing one first", accountID, targetSite)}
 				}
 			}
 			index = -1
