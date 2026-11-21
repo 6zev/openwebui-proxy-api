@@ -311,6 +311,8 @@ Session account cần biết:
 - Mọi request đều gửi **User-Agent giống browser** — LibreChat ghi violation nếu thiếu và đủ điểm sẽ **ban IP** (`BAN_DURATION`, mặc định 2 giờ).
 - Login bị từ chối (403 ban / sai mật khẩu) thì acc bị **tạm dừng 30 phút và KHÔNG retry** — mỗi lần thử là thêm một violation.
 - Lịch sử nhiều lượt được **làm phẳng thành transcript** gửi trong một lượt; proxy không giữ trạng thái hội thoại giữa các lần gọi.
+- **Mỗi request = một conversation mới** trong LibreChat (`conversationId` không gửi, `parentMessageId` = `00000000-…`). Đây là quyết định có chủ ý, không phải thiếu sót: giữ proxy stateless nên restart/nhiều replica không mất mapping, không có chuyện hai hội thoại khác nhau bị gộp rồi model trả lời lẫn lịch sử, và client chỉ biết `messages[]` vẫn chạy đúng. Cái giá là sidebar nhiều conversation rác — rác thẩm mỹ, không phải rác chức năng (bật `isTemporary` còn không lưu lại).
+- Chỉ đổi hướng khi client **tự gửi** `conversationId`/`parentMessageId` (cần thêm header vào `libreChatStartTurn` và đọc `conversationId` từ frame `final` của stream). Hướng này **cộng thêm** chứ không phá hành vi mặc định: không gửi thì vẫn tạo conversation mới. Không dùng cách đoán bằng hash `messages[0]` — hai hội thoại cùng mở đầu sẽ dính nhau.
 - Route chat là `/api/agents/chat/<endpoint>` với `endpointType: "custom"` và `endpoint` suy ra từ model (`Deepseek`, `openAI`, `Anthropic`, `Google`) — **không** dùng `agents`/`agent_id`.
 
 Shape body (lấy từ DevTools của UI thật):
