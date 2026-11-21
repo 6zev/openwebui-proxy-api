@@ -17,7 +17,7 @@ import (
 // /api/endpoints describes them with and without credentials.
 type providerFilterFixture struct {
 	server    *httptest.Server
-	endpoints int32
+	endpoints atomic.Int32
 	// endpointsBody overrides the /api/endpoints document (nil = default).
 	endpointsBody *string
 }
@@ -51,7 +51,7 @@ func newProviderFilterFixture(t *testing.T) *providerFilterFixture {
 		case "/api/models":
 			_, _ = io.WriteString(w, providerFilterModels)
 		case "/api/endpoints":
-			f.endpoints++
+			f.endpoints.Add(1)
 			if f.endpointsBody != nil {
 				_, _ = io.WriteString(w, *f.endpointsBody)
 				return
@@ -123,7 +123,7 @@ func TestProviderFilterDropsKeylessProviders(t *testing.T) {
 	}
 	// One listing costs one /api/endpoints call: the filter reads the map already
 	// cached for decoration instead of asking again.
-	if got := f.endpoints; got != 1 {
+	if got := f.endpoints.Load(); got != 1 {
 		t.Errorf("endpoints calls = %d, want 1", got)
 	}
 }
@@ -196,7 +196,7 @@ func TestProviderFilterSurvivesCache(t *testing.T) {
 	if ids := modelIDs(cached); len(ids) != 5 || strings.Contains(strings.Join(ids, ","), "claude-opus-4-7") {
 		t.Errorf("cached listing = %v, want the filtered five", ids)
 	}
-	if got := f.endpoints; got != 1 {
+	if got := f.endpoints.Load(); got != 1 {
 		t.Errorf("endpoints calls = %d, want 1 (the cache must serve the second call)", got)
 	}
 }
