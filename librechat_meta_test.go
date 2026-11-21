@@ -3,7 +3,20 @@ package main
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
+
+// filterTestConfig needs no upstream: the filter reads a map the test hands it.
+func filterTestConfig() Config {
+	return Config{
+		BaseURL: "http://librechat.invalid", APIKey: testProxyKey, Timeout: time.Second, Cooldown: time.Second,
+		FilterUnconfiguredProviders: true,
+		Accounts: []AccountConfig{{
+			ID: "lc", Backend: BackendLibreChat,
+			Email: "a@b.test", Password: "pw",
+		}},
+	}
+}
 
 // The provider key is the endpoint name, so metadata lands on exactly the models
 // that belong to that endpoint; anything unknown is left alone rather than guessed.
@@ -64,7 +77,7 @@ func TestFilterProviderModels(t *testing.T) {
 		"Anthropic":  {},
 		"openRouter": {},
 	}
-	p, err := NewProxy(proxyTestConfig(&proxyTestUpstream{}, "alpha"))
+	p, err := NewProxy(filterTestConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +104,7 @@ func TestFilterProviderModelsKeepsListWhenInconclusive(t *testing.T) {
 		{ID: "a", OwnedBy: "deepseek"},
 		{ID: "b", OwnedBy: "xai"},
 	}
-	p, err := NewProxy(proxyTestConfig(&proxyTestUpstream{}, "alpha"))
+	p, err := NewProxy(filterTestConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
