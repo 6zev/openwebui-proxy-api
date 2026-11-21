@@ -315,6 +315,8 @@ X-Account-ID: &lt;account_id&gt;  <span class="code-comment"># tuỳ chọn</spa
             <input id="entity-timeout" name="timeout_ms" type="number" min="0" max="3600000" step="500" inputmode="numeric" placeholder="Để trống để dùng UPSTREAM_TIMEOUT_MS">
             <p class="hint">Dành cho upstream chậm: đặt lớn hơn timeout chung. Để trống hoặc 0 để kế thừa.</p>
           </div>
+          <label class="check" for="entity-insecure-tls"><input id="entity-insecure-tls" type="checkbox"> Bỏ qua kiểm tra chứng chỉ TLS (dùng cho upstream địa chỉ IP)</label>
+          <p class="hint">Chỉ bật khi upstream tự host đứng sau IP: chứng chỉ không có IP SAN nên không thể xác thực. Tên miền thường không cần.</p>
         </div>
         <div id="account-fields" hidden>
           <div class="field">

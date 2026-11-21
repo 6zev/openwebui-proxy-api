@@ -387,6 +387,7 @@
     $('account-fields').hidden = kind !== 'account';
     $('entity-url').required = kind === 'website';
     $('entity-url').disabled = kind !== 'website';
+    $('entity-insecure-tls').disabled = kind !== 'website';
     for (const id of ['entity-website', 'entity-email', 'entity-password', 'entity-backend', 'entity-api-key']) $(id).disabled = kind !== 'account';
     $('entity-website').required = kind === 'account';
     // email/password `required` and visibility are owned by syncBackendFields()
@@ -398,6 +399,7 @@
     $('entity-name').value = entity?.stored_name || '';
     $('entity-url').value = entity?.base_url || '';
     $('entity-timeout').value = entity?.timeout_ms ? String(entity.timeout_ms) : '';
+    $('entity-insecure-tls').checked = Boolean(entity?.insecure_tls);
     $('entity-email').value = entity?.email || '';
     $('entity-backend').value = entity?.backend || 'openwebui';
     $('entity-backend').onchange = syncBackendFields;
@@ -492,6 +494,7 @@
         if (!Number.isInteger(ms) || ms < 0 || ms > 3600000) { showError('editor-error', 'Timeout phải là số nguyên từ 0 đến 3600000 ms.'); return; }
         body.timeout_ms = ms;
       } else body.timeout_ms = 0;
+      body.insecure_tls = $('entity-insecure-tls').checked;
     } else {
       body.website_id = $('entity-website').value;
       if (!state.websites.some((site) => site.id === body.website_id)) { showError('editor-error', 'Chọn một website đã đăng ký.'); return; }

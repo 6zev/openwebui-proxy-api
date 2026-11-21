@@ -610,6 +610,51 @@ func TestAdminConcurrentCRUDDoesNotLoseUpdates(t *testing.T) {
 	}
 }
 
+// TestAdminWebsiteInsecureTLS keeps the bare-IP escape hatch reachable from the
+// WebUI: the flag must persist, round-trip through state, and be clearable.
+func TestAdminWebsiteInsecureTLS(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	cfg := proxyTestConfig(u, "owui")
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "config.json")
+	s := adminTestServer(t, cfg, adminTestKey)
+	adminTestMutation(t, s, "POST", "/api/admin/websites", map[string]any{
+		"id": "ip", "base_url": "https://114.34.242.158:1443", "insecure_tls": true,
+	})
+	var state struct {
+		Websites []struct {
+			ID          string `json:"id"`
+			InsecureTLS bool   `json:"insecure_tls"`
+		} `json:"websites"`
+	}
+	resp := adminTestRequest(t, s, "GET", "/api/admin/state", "", adminTestKey, nil)
+	if err := json.Unmarshal([]byte(resp.body), &state); err != nil {
+		t.Fatalf("state: %v", err)
+	}
+	seen := false
+	for _, site := range state.Websites {
+		if site.ID == "ip" {
+			seen = true
+			if !site.InsecureTLS {
+				t.Fatal("insecure_tls lost from state")
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("website ip missing from state")
+	}
+	adminTestMutation(t, s, "PUT", "/api/admin/websites/ip", map[string]any{"insecure_tls": false})
+	state.Websites = nil
+	resp = adminTestRequest(t, s, "GET", "/api/admin/state", "", adminTestKey, nil)
+	if err := json.Unmarshal([]byte(resp.body), &state); err != nil {
+		t.Fatalf("state: %v", err)
+	}
+	for _, site := range state.Websites {
+		if site.ID == "ip" && site.InsecureTLS {
+			t.Fatal("insecure_tls not cleared")
+		}
+	}
+}
+
 // TestAdminLibreChatAccountDropsCredentials guards the LibreChat contract: the
 // backend has no email/password pair, so switching an account to it must clear
 // any stored credentials instead of persisting dead secrets.

@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -11,11 +12,35 @@ import (
 
 // Go's HTTP transport supports HTTP(S) CONNECT and SOCKS5 proxies, including
 // username/password authentication. Proxy credentials never go to the origin.
+
+// certificateCannotValidate reports whether a base URL is addressed by a bare IP
+// literal. A public CA never issues IP SANs to such a host, so Go's verifier
+// fails with "x509: cannot validate certificate for <ip> because it doesn't
+// contain any IP SANs" and the upstream is unreachable. Verification is skipped
+// automatically for those hosts only; DNS-named upstreams keep full verification
+// unless the website opts into insecure_tls.
+func certificateCannotValidate(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil || !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	// A bracketed IPv6 literal (or a zone-scoped one) never has a usable SAN.
+	if strings.Contains(host, ":") {
+		return true
+	}
+	return net.ParseIP(host) != nil
+}
+
 // newOutboundClient builds the HTTP client for an account.
 //
 // insecure skips certificate verification. It exists for self-hosted instances
 // reached by bare IP (a cert without an IP SAN cannot validate), and it is
-// opt-in per website: nothing is skipped unless the operator asks.
+// opt-in per website; bare IP hosts are detected automatically (see
+// certificateCannotValidate), nothing else is skipped unless the operator asks.
 func newOutboundClient(raw string, timeout time.Duration, insecure ...bool) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = timeout

@@ -240,6 +240,14 @@ Từ v0.28.0 proxy **chuyển tiếp nguyên văn lý do** upstream trả về: 
 
 Mật khẩu/email của acc đó đã bị upstream từ chối (đăng nhập lại bằng tay sẽ thấy). Proxy chỉ in một dòng mỗi 10 phút kèm `consecutive=N`; sửa mật khẩu trong WebUI là dòng `recovered` xuất hiện. Đây **không phải** lỗi proxy.
 
+### `x509: cannot validate certificate for <ip> ... doesn't contain any IP SANs`
+
+Upstream là HTTPS nhưng địa chỉ là IP trần (`https://114.34.242.158:1443`) nên chứng chỉ không có IP SAN và Go từ chối xác thực — đăng nhập LibreChat/Open WebUI hỏng ngay bước `api/auth/login`.
+
+- Proxy tự bỏ qua kiểm tra chứng chỉ khi `base_url` là IP trần (IPv4/IPv6), vì không CA công khai nào cấp IP SAN; website dùng tên miền vẫn xác thực đầy đủ.
+- Nếu cần cho tên miền có chứng chỉ sai (self-signed), bật `insecure_tls: true` ở website đó (hoặc tick “Bỏ qua kiểm tra chứng chỉ TLS” trong WebUI). Đây là tuỳ chọn theo website, không phải toàn cục.
+- Cách sạch nhất vẫn là dùng tên miền khớp chứng chỉ, hoặc cài CA riêng vào máy chạy proxy.
+
 ### `debug: model-cache refresh failed` (connection timed out)
 
 Upstream đang treo, không phải proxy treo. Mặc định mỗi acc có 300s ngân sách, nên một lần treo TCP kéo dài ~2m47s trước khi bị bỏ. Cache vẫn phục vụ bản cũ (`X-Model-Cache: stale-error`) nên client không bị chặn, nhưng log sẽ ồn.

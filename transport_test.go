@@ -143,6 +143,46 @@ func TestOutboundSOCKS5(t *testing.T) {
 	}
 }
 
+// A website given as a bare IP cannot present a valid certificate, so its client
+// must skip verification automatically; a DNS-named website keeps verifying.
+func TestOutboundClientTLSModeForBareIP(t *testing.T) {
+	u := newProxyTestUpstream(t)
+	cfg := proxyTestConfig(u, "plain")
+	cfg.Websites = []WebsiteConfig{{ID: "ip", BaseURL: "https://114.34.242.158:1443"}}
+	cfg.Accounts = append(cfg.Accounts, AccountConfig{ID: "sess", WebsiteID: "ip", Backend: BackendLibreChat, Email: "a@b.test", Password: "pw"})
+	p, err := NewProxy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range p.accounts {
+		transport := a.client.Transport.(*http.Transport)
+		insecure := transport.TLSClientConfig != nil && transport.TLSClientConfig.InsecureSkipVerify
+		wantInsecure := a.config.WebsiteID == "ip"
+		if insecure != wantInsecure {
+			t.Errorf("account %s insecure=%v, want %v", a.config.ID, insecure, wantInsecure)
+		}
+	}
+}
+
+func TestCertificateCannotValidate(t *testing.T) {
+	for _, tc := range []struct {
+		url  string
+		want bool
+	}{
+		{url: "https://114.34.242.158:1443", want: true},
+		{url: "https://114.34.242.158", want: true},
+		{url: "https://[2001:db8::1]:1443", want: true},
+		{url: "https://chat.example.test", want: false},
+		{url: "https://10.0.0.5/chatto", want: true},
+		{url: "http://114.34.242.158:1443", want: false},
+		{url: "", want: false},
+	} {
+		if got := certificateCannotValidate(tc.url); got != tc.want {
+			t.Errorf("certificateCannotValidate(%q) = %v, want %v", tc.url, got, tc.want)
+		}
+	}
+}
+
 func TestOutboundProxyValidation(t *testing.T) {
 	for _, raw := range []string{"ftp://host:21", "http://host", "http://host:8080/path", "socks5://:1234", "http://host:1?x=1"} {
 		if _, err := newOutboundClient(raw, time.Second); err == nil {

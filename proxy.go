@@ -31,7 +31,9 @@ type WebsiteConfig struct {
 	TimeoutMS int `json:"timeout_ms,omitempty"`
 	// InsecureTLS skips certificate verification for this website. A self-hosted
 	// instance reached by bare IP cannot present a valid certificate (no IP SAN),
-	// so this is the supported escape hatch — per website, never global.
+	// so this is the supported escape hatch — per website, never global. A
+	// website whose base URL is a bare IP gets this behaviour automatically, so
+	// it only needs setting for a named host behind a broken certificate.
 	InsecureTLS bool `json:"insecure_tls,omitempty"`
 }
 type AccountConfig struct {
@@ -293,7 +295,15 @@ func buildProxy(c Config, allowEmpty bool) (*Proxy, error) {
 		if a.WebsiteID != "" {
 			timeout = timeoutFor(c, p.sites[a.WebsiteID].TimeoutMS)
 		}
-		client, err := newOutboundClient(proxyURL, timeout, p.sites[a.WebsiteID].InsecureTLS)
+		// Auto-skip certificate verification for an upstream addressed by bare IP:
+		// no public CA issues IP SANs, so the handshake can never validate. Checked
+		// against the account's own base URL, which also covers accounts that name
+		// no website.
+		insecureTLS := certificateCannotValidate(a.BaseURL)
+		if a.WebsiteID != "" {
+			insecureTLS = insecureTLS || p.sites[a.WebsiteID].InsecureTLS
+		}
+		client, err := newOutboundClient(proxyURL, timeout, insecureTLS)
 		if err != nil {
 			return nil, fmt.Errorf("account %s: invalid outbound proxy configuration", a.ID)
 		}
