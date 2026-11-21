@@ -30,6 +30,9 @@ func TestValidateBackendAccountMatrix(t *testing.T) {
 		{name: "librechat api key at minimum length", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k1234567"}},
 		{name: "librechat api key with space", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k1234 678"}, wantErr: true},
 		{name: "librechat rejects password", account: AccountConfig{ID: "a", Backend: BackendLibreChat, APIKey: "k12345678", Password: "pw"}, wantErr: true},
+		{name: "librechat with email and password", account: AccountConfig{ID: "a", Backend: BackendLibreChat, Email: "bot@example.test", Password: "pw"}},
+		{name: "librechat session missing password", account: AccountConfig{ID: "a", Backend: BackendLibreChat, Email: "bot@example.test"}, wantErr: true},
+		{name: "librechat session missing email", account: AccountConfig{ID: "a", Backend: BackendLibreChat, Password: "pw"}, wantErr: true},
 		{name: "unknown backend", account: AccountConfig{ID: "a", Backend: BackendKind("ollama"), Email: "a@example.test", Password: "pw", APIKey: "k12345678"}, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

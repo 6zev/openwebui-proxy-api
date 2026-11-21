@@ -65,20 +65,27 @@ func validateBackendAccount(a AccountConfig) error {
 		//     does (POST /api/agents/chat/completions + GET .../chat/stream/<id>).
 		// They are not interchangeable: the Agents API refuses a session JWT with
 		// invalid_api_key, and the chat UI route does not accept an agent key.
-		if strings.TrimSpace(a.Email) != "" || a.Password != "" {
-			if strings.TrimSpace(a.Email) == "" || a.Password == "" {
+		email := strings.TrimSpace(a.Email)
+		if a.APIKey != "" && (email != "" || a.Password != "") {
+			return errors.New("librechat account carries both api_key and email/password; pick one: api_key for the Agents API, email/password for the web chat session")
+		}
+		// Email or password alone signals a session account; the pair is then
+		// required. Checked before the api_key branch, otherwise a half-filled
+		// session account falls through and is reported as a missing api_key.
+		if email != "" || a.Password != "" {
+			if email == "" || a.Password == "" {
 				return errors.New("librechat session accounts need both email and password")
 			}
 			if len(a.Email) > 320 || len(a.Password) > 8192 {
 				return errors.New("librechat account email or password is too long")
 			}
-			if a.APIKey != "" {
-				return errors.New("librechat account carries both api_key and email/password; pick one: api_key for the Agents API, email/password for the web chat session")
-			}
 			return nil
 		}
+		if a.APIKey == "" {
+			return errors.New("librechat accounts require an api_key, or email and password for the web chat session")
+		}
 		if len(a.APIKey) < minLibreChatAPIKeyLength {
-			return errors.New("librechat accounts require an api_key")
+			return errors.New("librechat account api_key is too short; use the full Agent API key, or use email and password instead")
 		}
 		if len(a.APIKey) > 8192 {
 			return errors.New("librechat account api_key is too long")

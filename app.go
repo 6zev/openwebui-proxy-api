@@ -503,9 +503,11 @@ func (a *Application) accountMutation(w http.ResponseWriter, r *http.Request, id
 		if draft.APIKey != nil && strings.TrimSpace(*draft.APIKey) != "" {
 			account.APIKey = strings.TrimSpace(*draft.APIKey)
 		}
-		// Switching an account to LibreChat clears the Open WebUI credentials so
-		// no dead secret is left behind in the stored config.
-		if normalizeBackend(account.Backend) == BackendLibreChat {
+		// A LibreChat account takes one credential shape. Switching to it with
+		// only an api_key clears the stored session pair so no dead secret is left
+		// behind; when the draft carries email/password instead, the api_key is
+		// already cleared and the session credentials are kept.
+		if normalizeBackend(account.Backend) == BackendLibreChat && account.APIKey != "" {
 			account.Email = ""
 			account.Password = ""
 		}
