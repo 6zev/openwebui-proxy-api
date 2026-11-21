@@ -101,35 +101,48 @@ func TestFilterProviderModels(t *testing.T) {
 // deployment credential, so its models are dead the same way an empty apiKey is. This
 // is the shape a real LibreChat answers with for openAI/anthropic/google.
 func TestFilterProviderModelsDropsUserProvideProviders(t *testing.T) {
-	models := []cachedModel{
-		{ID: "deepseek-chat", OwnedBy: "Deepseek"},
-		{ID: "claude-opus-5", OwnedBy: "anthropic"},
-		{ID: "gpt-5.6", OwnedBy: "openAI"},
-		{ID: "gemini-3.8-flash", OwnedBy: "google"},
-		{ID: "grok-4.6", OwnedBy: "xai"},
-	}
-	// Deepseek and xai are the custom endpoints; the three built-ins only offer
-	// userProvide, which is the shape that used to slip through.
-	endpoints := map[string]libreChatEndpointInfo{
-		"Deepseek":  {Type: "custom"},
-		"anthropic": {UserProvide: true},
-		"openAI":    {UserProvide: true},
-		"google":    {UserProvide: true},
-		"xai":       {Type: "custom"},
-	}
 	p, err := NewProxy(filterTestConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
-	kept := p.filterProviderModels(p.accounts[0], endpoints, models)
-	ids := make([]string, 0, len(kept))
-	for _, model := range kept {
-		ids = append(ids, model.ID)
-	}
-	want := []string{"deepseek-chat", "grok-4.6"}
-	if len(ids) != len(want) || ids[0] != want[0] || ids[1] != want[1] {
-		t.Fatalf("kept = %v, want %v", ids, want)
-	}
+	t.Run("keyed custom endpoint", func(t *testing.T) {
+		models := []cachedModel{
+			{ID: "deepseek-chat", OwnedBy: "Deepseek"},
+			{ID: "claude-opus-5", OwnedBy: "anthropic"},
+			{ID: "gpt-5.6", OwnedBy: "openAI"},
+			{ID: "gemini-3.8-flash", OwnedBy: "google"},
+			{ID: "grok-4.6", OwnedBy: "xai"},
+		}
+		// Deepseek carries a literal key, xai an env ref; the three built-ins only offer
+		// userProvide, which is the shape that used to slip through.
+		endpoints := map[string]libreChatEndpointInfo{
+			"Deepseek":  {APIKey: "sk-0123456789abcdef"},
+			"xai":       {APIKeyRef: "${XAI_API_KEY}"},
+			"anthropic": {UserProvide: true},
+			"openAI":    {UserProvide: true},
+			"google":    {UserProvide: true},
+		}
+		kept := p.filterProviderModels(p.accounts[0], endpoints, models)
+		ids := make([]string, 0, len(kept))
+		for _, model := range kept {
+			ids = append(ids, model.ID)
+		}
+		want := []string{"deepseek-chat", "grok-4.6"}
+		if len(ids) != len(want) || ids[0] != want[0] || ids[1] != want[1] {
+			t.Fatalf("kept = %v, want %v", ids, want)
+		}
+	})
+	// userProvide alone is not evidence the provider is dead: a deployment may hold
+	// its key in the environment and still ask the caller for one.
+	t.Run("userProvide with a key", func(t *testing.T) {
+		models := []cachedModel{{ID: "gpt-5.6", OwnedBy: "openAI"}}
+		endpoints := map[string]libreChatEndpointInfo{
+			"openAI": {UserProvide: true, APIKey: "sk-0123456789abcdef"},
+		}
+		if got := p.filterProviderModels(p.accounts[0], endpoints, models); len(got) != 1 {
+			t.Errorf("kept = %v, want the model kept", got)
+		}
+	})
 }
 
 // A shape this build does not understand must not empty the picker: with nothing
