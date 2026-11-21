@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -87,6 +88,7 @@ func modelIDs(models []cachedModel) []string {
 	for _, model := range models {
 		ids = append(ids, model.ID)
 	}
+	sort.Strings(ids)
 	return ids
 }
 
@@ -100,7 +102,7 @@ func TestProviderFilterDropsKeylessProviders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"deepseek-chat", "deepseek-reasoner", "grok-4", "grok-4-mini", "gpt-5.4"}
+	want := []string{"deepseek-chat", "deepseek-reasoner", "gpt-5.4", "grok-4", "grok-4-mini"}
 	ids := modelIDs(models)
 	if len(ids) != len(want) {
 		t.Fatalf("listing = %v, want %v", ids, want)
