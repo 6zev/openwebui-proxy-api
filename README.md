@@ -356,6 +356,17 @@ Khi upstream từ chối vì ngân sách (`This request requires more credits, o
 
 Khi upstream trả lời rằng **provider không có credential** (`no_user_key`, `openAI API Key not provided`, `illegal_model_request`, `endpoint_models_not_loaded`, `api key not provided`), model đó bị coi là **không dùng được** trên deployment ấy: nó bị ẩn khỏi `/v1/models` trong `PROVIDER_COOLDOWN_SECONDS` (mặc định 30 phút) và lỗi trả về nói rõ nguyên nhân thay vì trông như lỗi tạm thời. Tắt bằng `HIDE_UNAVAILABLE_MODELS=0`.
 
+### Lọc provider chưa cấu hình API key
+
+LibreChat liệt kê **mọi** provider mà config của nó nhắc tới, kể cả provider chưa có key: một deployment chỉ cấu hình Deepseek và xAI vẫn trả `/api/models` kèm OpenRouter, Anthropic, Ollama... Chọn một model như thế thì luôn hỏng (`key not provided`).
+
+Với acc **session** (email/password) của LibreChat, proxy đọc `/api/endpoints` và **loại khỏi danh sách** những provider không có key: `apiKey` rỗng và `apiKeyRef` rỗng, hoặc key chỉ là placeholder (`${XAI_API_KEY}`, `user_provided`, `YOUR_API_KEY`, `sk-xxx`, `<...>`). Provider có `apiKeyRef` trỏ tới biến môi trường được giữ lại, vì key được resolve lúc gọi.
+
+- Mặc định **bật**; tắt bằng `FILTER_UNCONFIGURED_PROVIDERS=0` để thấy danh sách thô.
+- Provider không xuất hiện trong `/api/endpoints` (endpoint built-in như `openAI`, `anthropic`) được **giữ nguyên** — map đó chỉ mô tả custom endpoint, im lặng không phải bằng chứng.
+- Nếu map không giải mã được, hoặc tất cả entry đều trông như không có key, hoặc bộ lọc sẽ xoá sạch danh sách → giữ nguyên danh sách gốc thay vì làm rỗng model picker.
+- Một lần list chỉ tốn một request `/api/endpoints` (map đã cache được dùng lại cho phần metadata).
+
 Stream: SSE event name luôn là `message`; ngữ nghĩa nằm trong field `event` của payload — `on_message_delta` (có `delta.content[].text`), `on_token_usage` (token), và frame cuối `{"final":true,...}`. Frame đầu tiên là echo tin nhắn của chính người dùng nên **không** được tính vào câu trả lời. Bật `LIBRECHAT_STREAM_DEBUG=1` để dump payload thô khi upstream đổi format.
 - `LIBRECHAT_ORIGIN` chỉ cần đặt khi instance bật kiểm `Origin` chặt (gửi kèm `Origin`/`Referer`).
 

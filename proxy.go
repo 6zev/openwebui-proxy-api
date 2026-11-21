@@ -66,6 +66,11 @@ type Config struct {
 	// HideUnavailableModels removes such models from /v1/models instead of listing
 	// them and failing when a caller picks one.
 	HideUnavailableModels bool
+	// FilterUnconfiguredProviders drops the models of a LibreChat provider that has no
+	// API key configured at all, so the listing only shows what can actually answer.
+	// On by default for session deployments; set FILTER_UNCONFIGURED_PROVIDERS=0 to
+	// list every provider the upstream mentions.
+	FilterUnconfiguredProviders bool
 	// LibreChatOrigin is sent as Origin/Referer when signing in to LibreChat.
 	// Empty means no Origin header, which LibreChat's requireSameOrigin accepts.
 	LibreChatOrigin string

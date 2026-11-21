@@ -398,11 +398,76 @@ func (p *Proxy) fetchModelList(ctx context.Context, a *account) ([]cachedModel, 
 	}
 	// A session deployment lists ids only. Decorate them with the endpoint's display
 	// label and capabilities so a client sees the same detail an OpenAI-shaped
-	// upstream would have sent.
+	// upstream would have sent, and drop the providers that have no credential at
+	// all (the same rule a refused chat applies, only earlier).
 	if a.config.Backend == BackendLibreChat && a.config.APIKey == "" {
-		applyEndpointMetadata(models, p.libreChatEndpoints(ctx, a))
+		endpoints := p.libreChatEndpoints(ctx, a)
+		if p.config.FilterUnconfiguredProviders {
+			models = p.filterProviderModels(a, endpoints, models)
+		}
+		applyEndpointMetadata(models, endpoints)
 	}
 	return models, nil
+}
+
+// filterProviderModels removes the models whose provider has no API key configured.
+//
+// LibreChat's UI lists every model of every provider its config mentions, so a
+// deployment with only Deepseek and xAI still answers /api/models with OpenRouter,
+// Anthropic, Ollama... entries. Picking one of those can never work: the provider
+// answers that it has no credential. Rather than wait for such a refusal, every
+// provider whose /api/endpoints description carries no key is removed from the
+// listing. A provider described with a key placeholder (user_provided, ${...}) keeps
+// its models, because the caller supplies that key.
+//
+// The rule only applies when the endpoint map actually describes providers, and the
+// loaded set is never reduced to nothing: an unexpected shape leaves the list as it
+// was instead of emptying the model picker.
+func (p *Proxy) filterProviderModels(a *account, endpoints map[string]libreChatEndpointInfo, models []cachedModel) []cachedModel {
+	if len(endpoints) == 0 || len(models) == 0 {
+		return models
+	}
+	configured := providerCredentialState(endpoints)
+	if !anyProviderConfigured(configured) {
+		// Every custom endpoint looks key-less, which means the credential fields
+		// moved somewhere this build does not read. Filtering now would hide working
+		// providers, so the list stays as it is.
+		return models
+	}
+	kept := make([]cachedModel, 0, len(models))
+	for _, model := range models {
+		name := model.OwnedBy
+		if name == "" {
+			kept = append(kept, model)
+			continue
+		}
+		if ok, known := configured[name]; known && !ok {
+			p.debugf("debug: provider without credential hidden provider=%s account=%s", name, a.config.ID)
+			continue
+		}
+		// An unknown provider (a built-in endpoint absent from /api/endpoints) is kept:
+		// the map only describes custom endpoints, so silence is not evidence.
+		kept = append(kept, model)
+	}
+	if len(kept) == 0 {
+		// Hiding is meant to trim dead providers, not to blank the picker. Keep the
+		// listing and let a refusal explain itself per model.
+		p.debugf("debug: provider filter would empty the listing account=%s, keeping %d models", a.config.ID, len(models))
+		return models
+	}
+	return kept
+}
+
+// anyProviderConfigured reports whether at least one endpoint has a credential, which
+// is the difference between "this deployment uses Deepseek and xAI only" and "the
+// credential fields were not understood".
+func anyProviderConfigured(configured map[string]bool) bool {
+	for _, ok := range configured {
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 // parseProviderMap flattens LibreChat's /api/models shape. It returns nil when the

@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-var Version = "v0.37.3"
+var Version = "v0.37.4"
 
 // loadDotEnv intentionally supports single-line KEY=value, quoted strings and
 // comment lines only. No shell evaluation or variable interpolation is performed.
@@ -141,6 +141,11 @@ func configFromEnv() (Config, error) {
 	// those models are hidden from the listing by default on LibreChat deployments;
 	// set HIDE_UNAVAILABLE_MODELS=0 to list everything again.
 	c.HideUnavailableModels = os.Getenv("HIDE_UNAVAILABLE_MODELS") == "" || truthy(os.Getenv("HIDE_UNAVAILABLE_MODELS"))
+	// A provider with no key configured refuses every pick, and LibreChat lists all
+	// of them. Dropping those models from the listing is the same rule, applied
+	// before the caller can choose one; FILTER_UNCONFIGURED_PROVIDERS=0 keeps the raw
+	// list.
+	c.FilterUnconfiguredProviders = os.Getenv("FILTER_UNCONFIGURED_PROVIDERS") == "" || truthy(os.Getenv("FILTER_UNCONFIGURED_PROVIDERS"))
 	c.ProviderUnavailableCooldown, err = envDuration("PROVIDER_COOLDOWN_SECONDS", int64(30*time.Minute/time.Second), time.Second)
 	c.ModelCacheMaxTTL, err = envDuration("MODEL_CACHE_MAX_SECONDS", int64(12*c.ModelCacheTTL/time.Second), time.Second)
 	if err != nil {

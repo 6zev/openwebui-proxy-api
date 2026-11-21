@@ -15,12 +15,67 @@ import (
 // custom provider — lives in /api/endpoints instead. This file merges the two so a
 // session deployment exposes the same richness as an OpenAI-shaped upstream.
 
-// libreChatEndpointInfo is the part of an endpoint entry worth republishing.
+// libreChatEndpointInfo is the part of an endpoint entry worth republishing. The
+// credential fields are kept so the model list can also tell which providers are
+// configured at all; they are never published (applyEndpointMetadata copies only the
+// display fields) and never logged.
 type libreChatEndpointInfo struct {
 	ModelDisplayLabel string   `json:"modelDisplayLabel"`
 	Type              string   `json:"type"`
 	Order             int      `json:"order"`
 	Capabilities      []string `json:"capabilities"`
+	APIKey            string   `json:"apiKey"`
+	APIKeyRef         string   `json:"apiKeyRef"`
+}
+
+// withoutCredential reports whether an endpoint description says the provider has no
+// key at all: LibreChat lists every model of every provider named in its config, and
+// an empty apiKey/apiKeyRef is how that provider refuses each pick with
+// "key not provided". A ref without a literal key is kept, because the value lives in
+// the deployment's environment and is resolved at request time.
+func (e libreChatEndpointInfo) withoutCredential() bool {
+	if e.APIKey == "" {
+		return strings.TrimSpace(e.APIKeyRef) == ""
+	}
+	// A resolved key is never supposed to be echoed back, so any non-empty answer is
+	// trusted; only an obvious placeholder means the provider is not configured.
+	return isPlaceholderCredential(e.APIKey)
+}
+
+// isPlaceholderCredential recognises a key that is a template rather than a secret:
+// "${XAI_API_KEY}", "user_provided", "YOUR_API_KEY", "sk-xxx"... LibreChat documents
+// these spellings for a key the caller supplies.
+func isPlaceholderCredential(key string) bool {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "${") || strings.HasPrefix(trimmed, "{{") {
+		return true
+	}
+	lowered := strings.ToLower(trimmed)
+	for _, marker := range []string{"user_provided", "your_", "your-", "<", "placeholder"} {
+		if strings.Contains(lowered, marker) {
+			return true
+		}
+	}
+	// "sk-xxx", "xxxxx", "***" and friends: no entropy worth a real key.
+	body := strings.NewReplacer("-", "", "_", "", ".", "").Replace(lowered)
+	if strings.HasPrefix(body, "sk") && strings.Trim(strings.TrimPrefix(body, "sk"), "x") == "" {
+		return true
+	}
+	return strings.Trim(body, "x*0") == ""
+}
+
+// providerCredentialState reports, per provider, whether a key is configured. It is
+// the one question the model filter needs, answered from the endpoint map already in
+// hand — a second request would only repeat it.
+func providerCredentialState(endpoints map[string]libreChatEndpointInfo) map[string]bool {
+	configured := make(map[string]bool, len(endpoints))
+	for name, entry := range endpoints {
+		configured[name] = !entry.withoutCredential()
+	}
+	return configured
 }
 
 // libreChatEndpointCache memoises the endpoint map per account. The data changes
