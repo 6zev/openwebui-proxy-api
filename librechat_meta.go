@@ -26,6 +26,10 @@ type libreChatEndpointInfo struct {
 	Capabilities      []string `json:"capabilities"`
 	APIKey            string   `json:"apiKey"`
 	APIKeyRef         string   `json:"apiKeyRef"`
+	// UserProvide marks a provider that asks the caller for a key instead of
+	// holding one, which is how LibreChat reports a provider with no deployment
+	// credential at all.
+	UserProvide bool `json:"userProvide"`
 }
 
 // withoutCredential reports whether an endpoint description says the provider has no
@@ -34,6 +38,11 @@ type libreChatEndpointInfo struct {
 // "key not provided". A ref without a literal key is kept, because the value lives in
 // the deployment's environment and is resolved at request time.
 func (e libreChatEndpointInfo) withoutCredential() bool {
+	// A provider that offers to take the caller's key has none of its own; keeping
+	// it in the listing would offer a model that refuses the pick.
+	if e.UserProvide && e.APIKey == "" && strings.TrimSpace(e.APIKeyRef) == "" {
+		return true
+	}
 	if e.APIKey == "" {
 		return strings.TrimSpace(e.APIKeyRef) == ""
 	}
@@ -167,10 +176,12 @@ func applyEndpointMetadata(models []cachedModel, info map[string]libreChatEndpoi
 	if len(info) == 0 {
 		return
 	}
-	// Built-in endpoints (openAI, anthropic, google, bedrock, assistants...) are not
-	// listed by /api/endpoints — that map only carries CUSTOM endpoints — but they
-	// are still real, well-known providers. A short table fills in their label so the
-	// listing is not half-annotated.
+	// Some built-in endpoint names can be absent from /api/endpoints (that map only
+	// describes the provider types the deployment configured), yet the upstream does
+	// list their models, so they are still real. This table is the last resort for a
+	// label and for provider-level attributes; it must NOT invent capabilities or a
+	// type, because those feed the model picker and a built-in endpoint has none of
+	// the custom ones.
 	builtin := map[string]libreChatEndpointInfo{
 		"openAI":          {ModelDisplayLabel: "OpenAI"},
 		"anthropic":       {ModelDisplayLabel: "Anthropic"},

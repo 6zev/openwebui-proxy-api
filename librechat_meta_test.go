@@ -97,6 +97,39 @@ func TestFilterProviderModels(t *testing.T) {
 	}
 }
 
+// A provider entry that only offers to take the caller's key (userProvide) holds no
+// deployment credential, so its models are dead the same way an empty apiKey is. This
+// is the shape a real LibreChat answers with for openAI/anthropic/google.
+func TestFilterProviderModelsDropsUserProvideProviders(t *testing.T) {
+	models := []cachedModel{
+		{ID: "deepseek-chat", OwnedBy: "Deepseek"},
+		{ID: "claude-opus-5", OwnedBy: "anthropic"},
+		{ID: "gpt-5.6", OwnedBy: "openAI"},
+		{ID: "gemini-3.8-flash", OwnedBy: "google"},
+		{ID: "grok-4.6", OwnedBy: "xai"},
+	}
+	endpoints := map[string]libreChatEndpointInfo{
+		"Deepseek":  {},
+		"anthropic": {UserProvide: true},
+		"openAI":    {UserProvide: true},
+		"google":    {UserProvide: true},
+		"xai":       {Type: "custom"},
+	}
+	p, err := NewProxy(filterTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := p.filterProviderModels(p.accounts[0], endpoints, models)
+	ids := make([]string, 0, len(kept))
+	for _, model := range kept {
+		ids = append(ids, model.ID)
+	}
+	want := []string{"deepseek-chat", "grok-4.6"}
+	if len(ids) != len(want) || ids[0] != want[0] || ids[1] != want[1] {
+		t.Fatalf("kept = %v, want %v", ids, want)
+	}
+}
+
 // A shape this build does not understand must not empty the picker: with nothing
 // configured, or with no endpoint map at all, the list is returned untouched.
 func TestFilterProviderModelsKeepsListWhenInconclusive(t *testing.T) {

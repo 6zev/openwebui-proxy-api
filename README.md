@@ -348,7 +348,7 @@ Toàn bộ Model Parameters của LibreChat được chuyển vào `endpointOpti
 
 `/api/models` chỉ trả **id**. Những gì client muốn hiển thị cạnh tên model nằm ở `GET /api/endpoints`: `modelDisplayLabel`, `type`, `order`, `capabilities` (file_search, web_search, execute_code, subagents…). Proxy đọc bảng đó (cache 1 giờ/acc) và gắn vào từng model dưới khoá `x_endpoint_label`, `x_endpoint_type`, `x_endpoint_capabilities`.
 
-Lưu ý thật: `/api/endpoints` **chỉ liệt kê endpoint custom**. Provider built-in (openAI, anthropic, google, bedrock, assistants, azureAssistants…) không có trong đó, nên proxy điền label từ bảng tên đã biết.
+Lưu ý thật: `/api/endpoints` của LibreChat **có** liệt kê cả built-in, nhưng chỉ những loại deployment đã bật; entry built-in thường chỉ có `userProvide: true` (chờ người dùng tự nhập key) nên vẫn bị coi là chưa cấu hình. Provider không có mặt trong map (ví dụ `bedrock`, `assistants`, `azureAssistants` trên một số build) được điền label từ bảng tên đã biết và **giữ nguyên** trong danh sách.
 
 ### Lỗi "fewer max_tokens"
 
@@ -362,10 +362,11 @@ Khi upstream trả lời rằng **provider không có credential** (`no_user_key
 
 LibreChat liệt kê **mọi** provider mà config của nó nhắc tới, kể cả provider chưa có key: một deployment chỉ cấu hình Deepseek và xAI vẫn trả `/api/models` kèm OpenRouter, Anthropic, Ollama... Chọn một model như thế thì luôn hỏng (`key not provided`).
 
-Với acc **session** (email/password) của LibreChat, proxy đọc `/api/endpoints` và **loại khỏi danh sách** những provider không có key: `apiKey` rỗng và `apiKeyRef` rỗng, hoặc key chỉ là placeholder (`${XAI_API_KEY}`, `user_provided`, `YOUR_API_KEY`, `sk-xxx`, `<...>`). Provider có `apiKeyRef` trỏ tới biến môi trường được giữ lại, vì key được resolve lúc gọi.
+Với acc **session** (email/password) của LibreChat, proxy đọc `/api/endpoints` và **loại khỏi danh sách** những provider không có key: `apiKey` rỗng và `apiKeyRef` rỗng (kể cả khi LibreChat đánh dấu `userProvide: true` — provider chờ người dùng tự nhập key), hoặc key chỉ là placeholder (`${XAI_API_KEY}`, `user_provided`, `YOUR_API_KEY`, `sk-xxx`, `<...>`). Provider có `apiKeyRef` trỏ tới biến môi trường được giữ lại, vì key được resolve lúc gọi.
 
 - Mặc định **bật**; tắt bằng `FILTER_UNCONFIGURED_PROVIDERS=0` để thấy danh sách thô.
-- Provider không xuất hiện trong `/api/endpoints` (endpoint built-in như `openAI`, `anthropic`) được **giữ nguyên** — map đó chỉ mô tả custom endpoint, im lặng không phải bằng chứng.
+- `/api/endpoints` thật của LibreChat **có** liệt kê cả endpoint built-in (`openAI`, `anthropic`, `google`...) với `userProvide: true` — nghĩa là provider ấy chờ người dùng tự nhập key, deployment không giữ key nào. Entry như thế bị coi là **chưa cấu hình** và bị loại (cùng nhóm với `apiKey` rỗng).
+- Chỉ provider **vắng mặt hoàn toàn** trong map mới được giữ nguyên — im lặng không phải bằng chứng.
 - Nếu map không giải mã được, hoặc tất cả entry đều trông như không có key, hoặc bộ lọc sẽ xoá sạch danh sách → giữ nguyên danh sách gốc thay vì làm rỗng model picker.
 - Một lần list chỉ tốn một request `/api/endpoints` (map đã cache được dùng lại cho phần metadata).
 
