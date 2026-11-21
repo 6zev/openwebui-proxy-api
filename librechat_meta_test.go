@@ -108,8 +108,10 @@ func TestFilterProviderModelsDropsUserProvideProviders(t *testing.T) {
 		{ID: "gemini-3.8-flash", OwnedBy: "google"},
 		{ID: "grok-4.6", OwnedBy: "xai"},
 	}
+	// Deepseek and xai are the custom endpoints; the three built-ins only offer
+	// userProvide, which is the shape that used to slip through.
 	endpoints := map[string]libreChatEndpointInfo{
-		"Deepseek":  {},
+		"Deepseek":  {Type: "custom"},
 		"anthropic": {UserProvide: true},
 		"openAI":    {UserProvide: true},
 		"google":    {UserProvide: true},
