@@ -32,6 +32,10 @@ func (p *Proxy) forwardTranslated(w http.ResponseWriter, r *http.Request, body [
 		writeError(w, err)
 		return
 	}
+	// A translated call is still a chat completions call upstream. When the account
+	// is a LibreChat session account, tools cannot travel, so the request is refused
+	// here — after translation, where the chat body states the same fact — instead
+	// of being silently downgraded to a text answer.
 	var chatBody []byte
 	var dropped []string
 	switch kind {
@@ -44,6 +48,10 @@ func (p *Proxy) forwardTranslated(w http.ResponseWriter, r *http.Request, body [
 	}
 	if err != nil {
 		writeError(w, &apiError{status: 400, message: "Cannot translate request: " + err.Error()})
+		return
+	}
+	if p.isSessionChat(candidates) && chatBodyCarriesTools(chatBody) {
+		writeError(w, &apiError{status: 400, message: "This LibreChat account signs in with email/password, so tools are not supported. Use an account configured with an api_key."})
 		return
 	}
 	var model string
@@ -113,6 +121,17 @@ func (p *Proxy) forwardTranslated(w http.ResponseWriter, r *http.Request, body [
 		}
 	}
 	writeCompatJSON(w, raw)
+}
+
+// chatBodyCarriesTools reports whether a chat completions body (translated from
+// Responses or Anthropic) asks for tool use, using the same rule as the native
+// route so both entry points refuse the same requests.
+func chatBodyCarriesTools(chatBody []byte) bool {
+	var input map[string]json.RawMessage
+	if json.Unmarshal(chatBody, &input) != nil {
+		return false
+	}
+	return carriesTools(input)
 }
 
 func wantsStream(body []byte) bool {

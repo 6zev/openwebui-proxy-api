@@ -87,6 +87,101 @@ func libreChatSessionConfig(f *libreChatFixture) Config {
 	}
 }
 
+// A session account cannot carry tools: LibreChat builds its agent from the stored
+// endpoint configuration, so a body-level tools list is dropped before the run
+// starts. Refusing up front beats answering without the tool calls the client is
+// waiting for — and no login or turn may be attempted.
+func TestLibreChatSessionRejectsTools(t *testing.T) {
+	bodies := map[string]string{
+		"chat tools":       `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{}}}}]}`,
+		"chat tool_choice": `{"model":"m","messages":[{"role":"user","content":"hi"}],"tool_choice":"auto"}`,
+		"chat tool result": `{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"1"}]}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			f := newLibreChatFixture(t, "should never run")
+			s := newProxyTestServer(t, libreChatSessionConfig(f))
+			resp := proxyTestRequest(t, s, http.MethodPost, "/v1/chat/completions", body, testProxyKey, "")
+			requireProxyStatus(t, resp, http.StatusBadRequest)
+			if !strings.Contains(resp.body, "api_key") {
+				t.Errorf("refusal must name the remedy: %s", resp.body)
+			}
+			if got := f.logins.Load() + f.turns.Load() + f.streams.Load(); got != 0 {
+				t.Errorf("upstream was contacted: logins=%d turns=%d streams=%d", f.logins.Load(), f.turns.Load(), f.streams.Load())
+			}
+		})
+	}
+	// The translated entry points refuse the same requests instead of downgrading.
+	for name, call := range map[string]struct{ path, body string }{
+		"responses tools": {"/v1/responses", `{"model":"m","input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{}}}]}`},
+		"messages tools":  {"/v1/messages", `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"f","input_schema":{"type":"object","properties":{}}}]}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newLibreChatFixture(t, "should never run")
+			cfg := libreChatSessionConfig(f)
+			// The translated surfaces are only reachable with the opt-in translation
+			// flag, so the guard has to hold on that path too.
+			cfg.TranslateMissing = true
+			s := newProxyTestServer(t, cfg)
+			resp := proxyTestRequest(t, s, http.MethodPost, call.path, call.body, testProxyKey, "")
+			requireProxyStatus(t, resp, http.StatusBadRequest)
+			if !strings.Contains(resp.body, "api_key") {
+				t.Errorf("refusal must name the remedy: %s", resp.body)
+			}
+			if got := f.logins.Load() + f.turns.Load(); got != 0 {
+				t.Errorf("upstream was contacted: logins=%d turns=%d", f.logins.Load(), f.turns.Load())
+			}
+		})
+	}
+}
+
+// An empty or explicitly null tools list is an ordinary text request and must not
+// be mistaken for tool use.
+func TestCarriesToolsIgnoresEmptyLists(t *testing.T) {
+	plain := []string{
+		`{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[]}`,
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":null}`,
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"tool_choice":"none"}`,
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"none"}}`,
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"tool_choice":null}`,
+	}
+	for _, body := range plain {
+		var input map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(body), &input); err != nil {
+			t.Fatal(err)
+		}
+		if carriesTools(input) {
+			t.Errorf("text request reported as tool use: %s", body)
+		}
+	}
+	var input map[string]json.RawMessage
+	for _, body := range []string{
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}]}`,
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"tool_choice":"auto"}`,
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"tool_choice":"required"}`,
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"function","function":{"name":"f"}}}`,
+	} {
+		input = map[string]json.RawMessage{}
+		_ = json.Unmarshal([]byte(body), &input)
+		if !carriesTools(input) {
+			t.Errorf("tool use was not detected: %s", body)
+		}
+	}
+}
+
+// The guard must not cost the account a turn: a body without tools still runs.
+func TestLibreChatSessionStillRunsWithoutTools(t *testing.T) {
+	f := newLibreChatFixture(t, "ok")
+	s := newProxyTestServer(t, libreChatSessionConfig(f))
+	resp := proxyTestRequest(t, s, http.MethodPost, "/v1/chat/completions",
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[]}`, testProxyKey, "")
+	requireProxyStatus(t, resp, http.StatusOK)
+	if f.turns.Load() != 1 {
+		t.Errorf("turns = %d, want 1", f.turns.Load())
+	}
+}
+
 // A session account runs a turn through the web UI protocol: login, start the
 // generation, then follow its SSE stream. The persisted final answer wins over the
 // streamed fragments.

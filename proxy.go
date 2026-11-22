@@ -934,6 +934,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body []byte
+	hasTools := false
 	if chat || passThrough {
 		reader := http.MaxBytesReader(w, r.Body, 10<<20)
 		defer reader.Close()
@@ -989,6 +990,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			input["model"], _ = json.Marshal(model)
 		}
 		body, _ = json.Marshal(input)
+		hasTools = carriesTools(input)
 	}
 	candidates, err := p.candidatesForModel(r.Header.Get("X-Account-ID"), r.Header.Get("X-Website-ID"), requestModel(body))
 	if err != nil {
@@ -999,7 +1001,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A LibreChat session account speaks the web UI's turn protocol, not OpenAI's
 		// chat completions. The prompt is extracted and the turn is run through
 		// libreChatChat, which starts the generation and follows its SSE stream.
-		p.serveLibreChatSessionChat(w, r, body, candidates)
+		p.serveLibreChatSessionChat(w, r, body, candidates, hasTools)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), p.requestTimeout(candidates))
@@ -1293,6 +1295,63 @@ func (p *Proxy) forwardBody(w http.ResponseWriter, r *http.Request, body []byte,
 	}
 }
 
+// carriesTools reports whether a chat-completions body asks for tool use. Only the
+// presence of at least one usable tool counts: an absent, null or empty list is the
+// normal text request and must stay untouched. Message-level tool_calls and role
+// "tool" are included because a client resuming a tool loop sends the answer back
+// that way, and a session account cannot carry that history either.
+func carriesTools(input map[string]json.RawMessage) bool {
+	if raw, ok := input["tools"]; ok {
+		var tools []json.RawMessage
+		if json.Unmarshal(raw, &tools) == nil && len(tools) > 0 {
+			return true
+		}
+	}
+	if raw, ok := input["tool_choice"]; ok && toolChoiceAsksForTools(raw) {
+		return true
+	}
+	var messages []struct {
+		Role       string          `json:"role"`
+		ToolCalls  json.RawMessage `json:"tool_calls"`
+		ToolCallID string          `json:"tool_call_id"`
+	}
+	if json.Unmarshal(input["messages"], &messages) == nil {
+		for _, message := range messages {
+			if message.Role == "tool" || message.ToolCallID != "" {
+				return true
+			}
+			var calls []json.RawMessage
+			if json.Unmarshal(message.ToolCalls, &calls) == nil && len(calls) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// toolChoiceAsksForTools reports whether a tool_choice value requests tool use.
+// "none", an absent choice and null all mean "answer with text", which a session
+// account serves normally.
+func toolChoiceAsksForTools(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var name string
+	if json.Unmarshal(raw, &name) == nil {
+		return !isUnsetChoice(name) && !strings.EqualFold(strings.TrimSpace(name), "none")
+	}
+	var choice struct {
+		Type     string `json:"type"`
+		Function *struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if json.Unmarshal(raw, &choice) != nil {
+		return true
+	}
+	return choice.Type != "none"
+}
+
 // isSessionChat reports whether the first reachable candidate is a LibreChat
 // session account (email/password rather than a static agent key). Those accounts
 // need the web UI turn protocol, so they take a separate path.
@@ -1310,7 +1369,17 @@ func (p *Proxy) isSessionChat(candidates []*account) bool {
 // The account loop still applies: a session account that refuses the turn is
 // parked and the next candidate is tried, but a turn that already started is never
 // replayed — the upstream may have persisted it.
-func (p *Proxy) serveLibreChatSessionChat(w http.ResponseWriter, r *http.Request, body []byte, candidates []*account) {
+//
+// Tools are refused before any upstream call. A session account drives the chat UI,
+// and that surface only reaches models: the stored endpoint configuration decides
+// whether tools exist, so a tools list coming from the request body is dropped
+// before the agent ever runs. Answering with the text-only turn would look like a
+// success while the client waits for tool calls that will never come.
+func (p *Proxy) serveLibreChatSessionChat(w http.ResponseWriter, r *http.Request, body []byte, candidates []*account, hasTools bool) {
+	if hasTools {
+		writeError(w, &apiError{status: 400, message: "This LibreChat account signs in with email/password, so tools are not supported. Use an account configured with an api_key."})
+		return
+	}
 	model, prompt, stream, params, err := chatPromptFromBodyWithParams(body)
 	if err != nil {
 		writeError(w, err)

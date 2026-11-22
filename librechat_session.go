@@ -32,6 +32,13 @@ import (
 //     violation for anything else and enough violations ban the IP (BAN_DURATION);
 //   - a rejected login is never retried: it is recorded and the account is left
 //     alone for a while, so no attempt loop can accumulate violations.
+//
+// A session account is text-only: LibreChat builds the run's agent from the stored
+// endpoint configuration, so a tools list in the request body is stripped before
+// the model is called. Rather than answer without the tool calls the client is
+// waiting for, a request carrying tools is refused with 400 and the caller is told
+// to use an account configured with an api_key — the Agents API route, where tools
+// are translated and honoured.
 
 const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
